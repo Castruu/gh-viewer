@@ -138,6 +138,12 @@ impl GitHubClient {
     }
 }
 
+impl Default for GitHubClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 async fn gh_token() -> Result<String, CoreError> {
     let gh = GH_CANDIDATES
         .iter()
@@ -263,7 +269,16 @@ fn parse_dashboard(body: &str) -> Result<Dashboard, CoreError> {
 }
 
 fn convert_search(search: Search) -> Result<Vec<PullRequest>, CoreError> {
-    search.nodes.into_iter().flatten().map(convert_pr).collect()
+    let mut pull_requests = search
+        .nodes
+        .into_iter()
+        .flatten()
+        .map(convert_pr)
+        .collect::<Result<Vec<_>, _>>()?;
+    // The query's `sort:updated-desc` uses GitHub's search index, which lags
+    // behind `updatedAt`, so sort again on the real timestamps.
+    pull_requests.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(pull_requests)
 }
 
 fn convert_pr(node: PrNode) -> Result<PullRequest, CoreError> {
@@ -392,6 +407,34 @@ mod tests {
         let body = r#"{ "data": null, "errors": [ { "message": "Bad credentials" } ] }"#;
         let error = parse_dashboard(body).unwrap_err();
         assert_eq!(error.to_string(), "GitHub API error: Bad credentials");
+    }
+
+    #[test]
+    fn sorts_by_updated_at_newest_first() {
+        // GitHub's search index lags behind `updatedAt`, so `sort:updated-desc` isn't reliable.
+        let node = |number: u64, updated_at: &str| {
+            format!(
+                r#"{{ "number": {number}, "title": "t", "url": "u{number}", "isDraft": false,
+                     "updatedAt": "{updated_at}", "reviewDecision": null,
+                     "repository": {{ "nameWithOwner": "o/r" }}, "author": null,
+                     "commits": {{ "nodes": [] }} }}"#
+            )
+        };
+        let body = format!(
+            r#"{{ "data": {{ "viewer": {{ "login": "octocat" }},
+                 "authored": {{ "nodes": [ {}, {}, {} ] }},
+                 "reviewRequested": {{ "nodes": [] }} }} }}"#,
+            node(1, "2026-10-20T18:45:45Z"),
+            node(2, "2026-10-26T14:39:50Z"),
+            node(3, "2026-10-21T15:53:32Z"),
+        );
+        let numbers: Vec<u64> = parse_dashboard(&body)
+            .unwrap()
+            .authored
+            .iter()
+            .map(|pr| pr.number)
+            .collect();
+        assert_eq!(numbers, [2, 3, 1]);
     }
 
     /// Hits the real API with the local `gh` login: `cargo test -- --ignored`.
