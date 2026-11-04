@@ -1,8 +1,9 @@
 //! Core of GitHub Viewer: talks to the GitHub GraphQL API and exposes plain
 //! data types to the Swift app through UniFFI.
 
+use std::io;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
@@ -37,8 +38,18 @@ fragment pr on PullRequest {
 "#;
 
 /// Apps launched from Finder don't inherit the shell's PATH, so look in the
-/// usual Homebrew locations before falling back to a PATH lookup.
-const GH_CANDIDATES: &[&str] = &["/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+/// usual Homebrew and MacPorts locations before falling back to a PATH lookup.
+const GH_CANDIDATES: &[&str] = &[
+    "/opt/homebrew/bin/gh",
+    "/usr/local/bin/gh",
+    "/opt/local/bin/gh",
+];
+
+/// Without timeouts, a stalled connection (captive portal, flaky VPN) or a
+/// blocked `gh` would leave the app stuck mid-refresh until it's restarted.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const GH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -91,6 +102,9 @@ pub struct Dashboard {
     pub viewer_login: String,
     pub authored: Vec<PullRequest>,
     pub review_requested: Vec<PullRequest>,
+    /// Errors GitHub returned alongside the data, e.g. an org hiding its PRs
+    /// behind SAML SSO. Non-empty means the lists may be incomplete.
+    pub warnings: Vec<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -104,6 +118,8 @@ impl GitHubClient {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
             .user_agent(concat!("github-viewer/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("default reqwest client should build");
         Self { http }
@@ -132,9 +148,22 @@ impl GitHubClient {
             return Err(CoreError::Auth("GitHub rejected the gh token".into()));
         }
         if !status.is_success() {
-            return Err(CoreError::Api(format!("HTTP {status}")));
+            return Err(http_error(status, &body));
         }
         parse_dashboard(&body)
+    }
+}
+
+/// Builds an error for a non-2xx response, keeping GitHub's explanation
+/// (e.g. "API rate limit exceeded") when the body has one.
+fn http_error(status: reqwest::StatusCode, body: &str) -> CoreError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        message: String,
+    }
+    match serde_json::from_str::<ErrorBody>(body) {
+        Ok(error) => CoreError::Api(format!("HTTP {status}: {}", error.message)),
+        Err(_) => CoreError::Api(format!("HTTP {status}")),
     }
 }
 
@@ -151,11 +180,18 @@ async fn gh_token() -> Result<String, CoreError> {
         .find(|path| Path::new(path).exists())
         .unwrap_or("gh");
 
-    let output = tokio::process::Command::new(gh)
+    let command = tokio::process::Command::new(gh)
         .args(["auth", "token"])
-        .output()
+        // Make sure a timed-out gh doesn't linger.
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(GH_TIMEOUT, command)
         .await
-        .map_err(|_| CoreError::GhNotFound)?;
+        .map_err(|_| CoreError::Auth("`gh auth token` timed out".into()))?
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => CoreError::GhNotFound,
+            _ => CoreError::Auth(format!("couldn't run gh: {e}")),
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -250,13 +286,20 @@ fn parse_dashboard(body: &str) -> Result<Dashboard, CoreError> {
     let response: GraphQlResponse = serde_json::from_str(body)
         .map_err(|e| CoreError::Api(format!("unexpected response: {e}")))?;
 
+    let mut messages: Vec<String> = Vec::new();
+    for error in response.errors.unwrap_or_default() {
+        if !messages.contains(&error.message) {
+            messages.push(error.message);
+        }
+    }
+
     // GraphQL can return errors alongside usable data (e.g. one org blocks the
-    // token via SAML). Show what we got; only fail when there's no data at all.
+    // token via SAML). Show what we got and pass the errors on as warnings;
+    // only fail when there's no data at all.
     let Some(data) = response.data else {
-        let message = response
-            .errors
-            .and_then(|errors| errors.into_iter().next())
-            .map(|error| error.message)
+        let message = messages
+            .into_iter()
+            .next()
             .unwrap_or_else(|| "response contained no data".into());
         return Err(CoreError::Api(message));
     };
@@ -265,6 +308,7 @@ fn parse_dashboard(body: &str) -> Result<Dashboard, CoreError> {
         viewer_login: data.viewer.login,
         authored: convert_search(data.authored)?,
         review_requested: convert_search(data.review_requested)?,
+        warnings: messages,
     })
 }
 
@@ -400,6 +444,47 @@ mod tests {
         let dashboard = parse_dashboard(body).unwrap();
         assert!(dashboard.authored.is_empty());
         assert!(dashboard.review_requested.is_empty());
+        assert_eq!(
+            dashboard.warnings,
+            ["Resource protected by organization SAML enforcement."]
+        );
+    }
+
+    #[test]
+    fn deduplicates_warnings() {
+        // GitHub repeats the same error once per hidden node.
+        let body = r#"{
+          "data": {
+            "viewer": { "login": "octocat" },
+            "authored": { "nodes": [ null, null ] },
+            "reviewRequested": { "nodes": [] }
+          },
+          "errors": [ { "message": "SAML" }, { "message": "SAML" } ]
+        }"#;
+        assert_eq!(parse_dashboard(body).unwrap().warnings, ["SAML"]);
+    }
+
+    #[test]
+    fn has_no_warnings_on_a_clean_response() {
+        assert!(parse_dashboard(FULL_RESPONSE).unwrap().warnings.is_empty());
+    }
+
+    #[test]
+    fn includes_github_message_in_http_errors() {
+        let error = http_error(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{ "message": "API rate limit exceeded", "documentation_url": "x" }"#,
+        );
+        assert_eq!(
+            error.to_string(),
+            "GitHub API error: HTTP 403 Forbidden: API rate limit exceeded"
+        );
+    }
+
+    #[test]
+    fn http_errors_without_a_json_body_show_the_status() {
+        let error = http_error(reqwest::StatusCode::BAD_GATEWAY, "<html>bad gateway</html>");
+        assert_eq!(error.to_string(), "GitHub API error: HTTP 502 Bad Gateway");
     }
 
     #[test]
