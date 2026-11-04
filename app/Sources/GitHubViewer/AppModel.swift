@@ -6,6 +6,8 @@ import Observation
 @Observable
 final class AppModel {
     static let refreshInterval: Duration = .seconds(120)
+    /// Retry sooner after a failure, e.g. when the Mac wakes before Wi-Fi is back.
+    static let retryInterval: Duration = .seconds(15)
 
     private(set) var dashboard: Dashboard?
     /// Set when the last refresh failed. Any previous dashboard is kept so the lists stay usable.
@@ -19,8 +21,10 @@ final class AppModel {
     init() {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.refresh()
-                try? await Task.sleep(for: Self.refreshInterval)
+                guard let self else { return }
+                await self.refresh()
+                let delay = self.errorMessage == nil ? Self.refreshInterval : Self.retryInterval
+                try? await Task.sleep(for: delay)
             }
         }
     }

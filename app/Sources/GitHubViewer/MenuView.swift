@@ -3,7 +3,10 @@ import SwiftUI
 
 /// The window shown when clicking the menu bar icon.
 struct MenuView: View {
+    static let maxListHeight: CGFloat = 480
+
     let model: AppModel
+    @State private var listHeight: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -12,7 +15,12 @@ struct MenuView: View {
             FooterView(model: model)
         }
         .frame(width: 420)
+        // The menu window is kept alive between openings, so onAppear may only
+        // fire the first time; becoming key happens on every open.
         .onAppear {
+            Task { await model.refreshIfStale() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             Task { await model.refreshIfStale() }
         }
     }
@@ -20,8 +28,12 @@ struct MenuView: View {
     @ViewBuilder
     private var content: some View {
         if let dashboard = model.dashboard {
+            if !dashboard.warnings.isEmpty {
+                WarningBanner(warnings: dashboard.warnings)
+                Divider()
+            }
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
                     PRSection(title: "Review requested",
                               pullRequests: dashboard.reviewRequested,
                               emptyText: "Nothing waiting on your review")
@@ -30,10 +42,12 @@ struct MenuView: View {
                               emptyText: "You have no open pull requests")
                 }
                 .padding(.vertical, 6)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
             }
-            .frame(height: 480)
+            // Fit short lists exactly; scroll once they're taller than maxListHeight.
+            .frame(height: min(listHeight, Self.maxListHeight))
         } else if let errorMessage = model.errorMessage {
-            ErrorView(message: errorMessage) {
+            ErrorView(message: errorMessage, isRetrying: model.isRefreshing) {
                 Task { await model.refresh() }
             }
         } else {
@@ -213,6 +227,7 @@ private struct CheckIcon: View {
 
 private struct ErrorView: View {
     let message: String
+    let isRetrying: Bool
     let retry: () -> Void
 
     var body: some View {
@@ -223,10 +238,39 @@ private struct ErrorView: View {
             Text(message)
                 .multilineTextAlignment(.center)
                 .textSelection(.enabled)
-            Button("Try Again", action: retry)
+            if isRetrying {
+                ProgressView().controlSize(.small)
+            } else {
+                Button("Try Again", action: retry)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(24)
+    }
+}
+
+/// Shown when GitHub returned results with errors, e.g. an org requiring SAML SSO.
+private struct WarningBanner: View {
+    let warnings: [String]
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Some pull requests may be missing")
+                    .font(.callout.weight(.medium))
+                Text(warnings.joined(separator: "\n"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .help(warnings.joined(separator: "\n"))
     }
 }
 
