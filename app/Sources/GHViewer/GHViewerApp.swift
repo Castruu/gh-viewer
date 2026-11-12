@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct GitHubViewerApp: App {
+struct GHViewerApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {

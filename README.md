@@ -1,4 +1,4 @@
-# GitHub Viewer
+# GH Viewer
 
 A macOS menu bar app that shows the pull requests waiting on your review and
 the status of your own open pull requests on github.com.
@@ -29,11 +29,11 @@ the status of your own open pull requests on github.com.
 ## Build and run
 
 ```sh
-scripts/build.sh          # builds build/GitHubViewer.app
+scripts/build.sh          # builds build/GHViewer.app
 scripts/build.sh --open   # builds, quits any running copy and launches it
 ```
 
-To keep it around, copy `build/GitHubViewer.app` to `/Applications`. The build is
+To keep it around, copy `build/GHViewer.app` to `/Applications`. The build is
 ad-hoc signed, which is fine for running on the machine that built it.
 
 ## Architecture
@@ -45,7 +45,7 @@ uniffi-bindgen/  Generates the Swift bindings for core.
 scripts/build.sh  cargo build -> generate bindings -> swift build -> .app bundle
 ```
 
-The build script generates `app/Sources/ghv_coreFFI`, `app/Sources/GitHubViewer/Generated`
+The build script generates `app/Sources/ghv_coreFFI`, `app/Sources/GHViewer/Generated`
 and `app/RustLib`. They're git-ignored, so run the script before `swift build`
 or opening `app/` in an editor.
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds build/GitHubViewer.app: Rust core -> Swift bindings -> SwiftPM app -> .app bundle.
+# Builds build/GHViewer.app: Rust core -> Swift bindings -> SwiftPM app -> .app bundle.
 # Usage: scripts/build.sh [--open]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APP_NAME="GitHubViewer"
+APP_NAME="GHViewer"
 APP="build/$APP_NAME.app"
 BINDINGS="target/bindings"
 # Must match LSMinimumSystemVersion in app/Info.plist and platforms in app/Package.swift;
@@ -23,11 +23,11 @@ cargo run --quiet --release -p uniffi-bindgen -- generate \
     --language swift \
     --out-dir "$BINDINGS"
 
-mkdir -p app/Sources/ghv_coreFFI app/Sources/GitHubViewer/Generated app/RustLib
+mkdir -p app/Sources/ghv_coreFFI app/Sources/GHViewer/Generated app/RustLib
 cp "$BINDINGS/ghv_coreFFI.h" app/Sources/ghv_coreFFI/
 # SwiftPM system library targets require the module map to be named module.modulemap.
 cp "$BINDINGS/ghv_coreFFI.modulemap" app/Sources/ghv_coreFFI/module.modulemap
-cp "$BINDINGS/ghv_core.swift" app/Sources/GitHubViewer/Generated/
+cp "$BINDINGS/ghv_core.swift" app/Sources/GHViewer/Generated/
 # Only the static library goes in RustLib, so the linker can't pick the dylib instead.
 cp target/release/libghv_core.a app/RustLib/
 

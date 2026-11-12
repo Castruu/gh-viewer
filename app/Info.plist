@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>GitHubViewer</string>
+	<string>GHViewer</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.castruu.GitHubViewer</string>
+	<string>io.github.castruu.GHViewer</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>GitHub Viewer</string>
+	<string>GH Viewer</string>
 	<key>CFBundleDisplayName</key>
-	<string>GitHub Viewer</string>
+	<string>GH Viewer</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -1,16 +1,16 @@
 // swift-tools-version: 6.0
 // Built by scripts/build.sh, which first compiles the Rust core and generates
-// the UniFFI bindings into Sources/ghv_coreFFI and Sources/GitHubViewer/Generated.
+// the UniFFI bindings into Sources/ghv_coreFFI and Sources/GHViewer/Generated.
 import PackageDescription
 
 let package = Package(
-    name: "GitHubViewer",
+    name: "GHViewer",
     platforms: [.macOS(.v14)],
     targets: [
         // C header + module map for the Rust library's FFI symbols.
         .systemLibrary(name: "ghv_coreFFI", path: "Sources/ghv_coreFFI"),
         .executableTarget(
-            name: "GitHubViewer",
+            name: "GHViewer",
             dependencies: ["ghv_coreFFI"],
             linkerSettings: [
                 // RustLib holds only the static library, so the app has no runtime dylib dependency.

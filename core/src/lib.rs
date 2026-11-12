@@ -1,4 +1,4 @@
-//! Core of GitHub Viewer: talks to the GitHub GraphQL API and exposes plain
+//! Core of GH Viewer: talks to the GitHub GraphQL API and exposes plain
 //! data types to the Swift app through UniFFI.
 
 use std::io;
@@ -117,7 +117,7 @@ impl GitHubClient {
     #[uniffi::constructor]
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("github-viewer/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("gh-viewer/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
