@@ -55,3 +55,7 @@ or opening `app/` in an editor.
 cargo test -p ghv_core                    # parsing and status mapping
 cargo test -p ghv_core -- --ignored       # live call to GitHub with your gh login
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

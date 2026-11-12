@@ -2,6 +2,7 @@
 name = "ghv_core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [lib]
 # staticlib is linked into the Swift app; cdylib is only used by uniffi-bindgen to read metadata.
