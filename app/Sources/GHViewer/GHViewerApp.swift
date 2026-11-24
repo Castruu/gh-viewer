@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct GHViewerApp: App {
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @State private var model = AppModel()
     @State private var reviews = ReviewStore()
     @Environment(\.openWindow) private var openWindow
@@ -12,6 +13,10 @@ struct GHViewerApp: App {
         } label: {
             MenuBarLabel(reviewCount: model.dashboard?.reviewRequested.count,
                          hasError: model.errorMessage != nil)
+                // Opening the app again from Finder or Spotlight shows the review window.
+                .onReceive(NotificationCenter.default.publisher(for: AppDelegate.reopen)) { _ in
+                    openWindow.reviewWindow()
+                }
                 // Development aid, for screenshots without clicking the menu bar:
                 // `open build/GHViewer.app --args --open-review-window [<PR URL to select>]`.
                 .onAppear {
@@ -30,6 +35,17 @@ struct GHViewerApp: App {
         }
         // Room for the sidebar, the diff and the agent chat side by side.
         .defaultSize(width: 1280, height: 800)
+    }
+}
+
+/// Forwards "reopen" (launching the app again while it runs) to SwiftUI,
+/// which has no scene API for it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let reopen = Notification.Name("GHViewerReopen")
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        NotificationCenter.default.post(name: Self.reopen, object: nil)
+        return false
     }
 }
 
