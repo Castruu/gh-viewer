@@ -102,6 +102,8 @@ pub enum AgentEvent {
     /// Answer with [`AgentHub::respond_permission`].
     PermissionRequest {
         request_id: String,
+        /// The `ToolCall` this asks about, so the UI can show it next to the call.
+        tool_call_id: String,
         title: String,
         options: Vec<PermissionChoice>,
     },
@@ -528,6 +530,7 @@ impl AgentHub {
                             kind: wire_name(&option.kind),
                         })
                         .collect();
+                    let tool_call_id = request.tool_call.tool_call_id.to_string();
                     let title = request
                         .tool_call
                         .fields
@@ -537,6 +540,7 @@ impl AgentHub {
                         session_id,
                         AgentEvent::PermissionRequest {
                             request_id,
+                            tool_call_id,
                             title,
                             options,
                         },
@@ -982,6 +986,7 @@ mod tests {
                     request_id,
                     title,
                     options,
+                    ..
                 },
             )) => (request_id, title, options),
             other => panic!("expected a permission request, got {other:?}"),
