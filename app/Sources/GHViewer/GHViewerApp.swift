@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct GHViewerApp: App {
     @State private var model = AppModel()
+    @State private var reviews = ReviewStore()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -25,7 +26,7 @@ struct GHViewerApp: App {
 
         // Opened from the menu bar; ReviewWindow keeps it from opening by itself at launch.
         Window("GH Viewer", id: ReviewWindow.id) {
-            ReviewWindow(model: model)
+            ReviewWindow(model: model, reviews: reviews)
         }
         // Room for the sidebar, the diff and the agent chat side by side.
         .defaultSize(width: 1280, height: 800)

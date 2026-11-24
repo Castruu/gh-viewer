@@ -27,6 +27,8 @@ final class PRReview {
     /// The diff lines the user selected. Questions to the agent include them.
     var selection: Selection?
     var chat = ChatState()
+    /// Changed by the diff to show the chat and focus its composer (e.g. "Ask about these lines").
+    var chatFocusRequest: UUID?
     private(set) var isSubmitting = false
 
     @ObservationIgnored private unowned let store: ReviewStore

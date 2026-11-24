@@ -1,16 +1,16 @@
 import Foundation
-import Observation
 
 /// Owns the Rust review hub and one `PRReview` per PR opened in the window.
+/// Not observable itself: views observe the `PRReview`s, and this is only their cache,
+/// so creating one while a view body runs doesn't count as a state change.
 @MainActor
-@Observable
 final class ReviewStore {
     private(set) var reviews: [String: PRReview] = [:]
 
-    @ObservationIgnored let github = GitHubClient()
-    @ObservationIgnored let drafts: DraftStore
-    @ObservationIgnored let hub: ReviewHub
-    @ObservationIgnored private let listener = CoreListener()
+    let github = GitHubClient()
+    let drafts: DraftStore
+    let hub: ReviewHub
+    private let listener = CoreListener()
 
     init() {
         let root = Self.dataDirectory().path

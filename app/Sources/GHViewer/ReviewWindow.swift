@@ -10,6 +10,7 @@ struct ReviewWindow: View {
     static var isRequested = false
 
     let model: AppModel
+    let reviews: ReviewStore
     @State private var isChatPresented = false
     @Environment(\.dismissWindow) private var dismissWindow
 
@@ -18,10 +19,10 @@ struct ReviewWindow: View {
             ReviewSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         } detail: {
-            PRDetail(model: model)
+            PRDetail(model: model, reviews: reviews)
         }
         .inspector(isPresented: $isChatPresented) {
-            AgentChatPlaceholder(pullRequest: model.selectedPullRequest)
+            ChatPane(review: model.selectedPullRequest.map(reviews.review(for:)))
                 .inspectorColumnWidth(min: 260, ideal: 320, max: 480)
         }
         .toolbar {
@@ -35,6 +36,11 @@ struct ReviewWindow: View {
                     Label("Agent Chat", systemImage: "bubble.left.and.bubble.right")
                 }
                 .help(isChatPresented ? "Hide agent chat" : "Show agent chat")
+            }
+        }
+        .onChange(of: model.selectedPullRequest.flatMap { reviews.review(for: $0).chatFocusRequest }) { _, request in
+            if request != nil {
+                isChatPresented = true
             }
         }
         .frame(minWidth: 760, minHeight: 440)
@@ -68,13 +74,16 @@ extension OpenWindowAction {
 /// The selected PR: its header, then the diff.
 private struct PRDetail: View {
     let model: AppModel
+    let reviews: ReviewStore
 
     var body: some View {
         if let pullRequest = model.selectedPullRequest {
             VStack(spacing: 0) {
                 PRHeader(pullRequest: pullRequest, isInDashboard: model.isSelectionInDashboard)
                 Divider()
-                DiffPlaceholder(pullRequest: pullRequest)
+                DiffPane(review: reviews.review(for: pullRequest))
+                    // One diff view per PR, so scroll position and selection don't leak between PRs.
+                    .id(pullRequest.url)
             }
         } else {
             ContentUnavailableView("No Pull Request Selected", systemImage: "arrow.triangle.pull",
