@@ -84,7 +84,10 @@ pub enum CoreError {
 /// Which side of a diff a line is on, named as GitHub's review API names them:
 /// `Left` is the base (removed lines), `Right` is the head (added and context lines).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize, Deserialize)]
+#[derive(schemars::JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
+// Inlined into MCP tool schemas, because not every agent's MCP client follows `$ref`.
+#[schemars(inline)]
 pub enum DiffSide {
     Left,
     Right,
