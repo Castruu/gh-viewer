@@ -30,6 +30,12 @@ const STDERR_LINES: usize = 50;
 /// Brackets `env -0` output so noise printed by interactive rc files is ignored.
 const ENV_MARKER: &str = "__GHV_SHELL_ENV_5f1c__";
 
+/// The name the app's own MCP server must be registered under in `session/new`.
+pub(crate) const MCP_SERVER_NAME: &str = "gh-viewer";
+/// Its tools. They're local and reversible (drafts stay local until the user
+/// submits them), so their permission requests are allowed once without asking.
+pub(crate) const MCP_TOOLS: [&str; 3] = ["get_pr_context", "list_review_threads", "draft_comment"];
+
 /// A coding agent the app can run through its ACP adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum AgentKind {
@@ -166,6 +172,8 @@ struct Shared {
     live: HashSet<u64>,
     sessions: HashMap<String, Session>,
     permissions: HashMap<String, PendingPermission>,
+    /// (session id, tool call id) of running Codex calls to the app's own MCP tools.
+    own_codex_calls: HashSet<(String, String)>,
 }
 
 impl Shared {
@@ -244,20 +252,13 @@ impl AgentHub {
                         process.stderr.tail()
                     ))
                 })?
-                .map_err(|error| {
-                    if error.code == ErrorCode::AUTH_REQUIRED {
-                        CoreError::Agent(format!(
-                            "{} isn't signed in. Run `{}` in a terminal, log in, then try again.",
-                            kind.name(),
-                            kind.login_command()
-                        ))
-                    } else {
-                        CoreError::Agent(format!(
-                            "{} couldn't open a session: {error}{}",
-                            kind.name(),
-                            process.stderr.tail()
-                        ))
-                    }
+                .map_err(|error| match signed_out(kind, &error) {
+                    Some(signed_out) => signed_out,
+                    None => CoreError::Agent(format!(
+                        "{} couldn't open a session: {error}{}",
+                        kind.name(),
+                        process.stderr.tail()
+                    )),
                 })?;
 
         let session_id = response.session_id.to_string();
@@ -293,7 +294,10 @@ impl AgentHub {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|error| CoreError::Agent(format!("{}: {error}", kind.name())))?;
+            .map_err(|error| {
+                signed_out(kind, &error)
+                    .unwrap_or_else(|| CoreError::Agent(format!("{}: {error}", kind.name())))
+            })?;
         Ok(wire_name(&response.stop_reason))
     }
 
@@ -362,7 +366,7 @@ impl AgentHub {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let connection =
-            self.client()
+            self.client(kind)
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                     let _ = ready_tx.send(cx.clone());
                     tokio::select! {
@@ -395,6 +399,9 @@ impl AgentHub {
                 shared
                     .permissions
                     .retain(|_, pending| !gone.contains(&pending.session_id));
+                shared
+                    .own_codex_calls
+                    .retain(|(session_id, _)| !gone.contains(session_id));
                 gone
             };
             for session_id in gone {
@@ -459,6 +466,7 @@ impl AgentHub {
     /// requests to the listener.
     fn client(
         &self,
+        kind: AgentKind,
     ) -> agent_client_protocol::v1::Builder<
         Client,
         impl agent_client_protocol::HandleDispatchFrom<Agent> + 'static,
@@ -466,13 +474,22 @@ impl AgentHub {
         let listener = self.listener.clone();
         let permission_listener = self.listener.clone();
         let shared = self.shared.clone();
+        let notification_shared = self.shared.clone();
         Client
             .v1()
             .name("gh-viewer")
             .on_receive_notification(
                 async move |notification: acp::SessionNotification, _cx| {
+                    let session_id = notification.session_id.to_string();
+                    if kind == AgentKind::Codex {
+                        track_own_codex_call(
+                            &mut lock(&notification_shared).own_codex_calls,
+                            &session_id,
+                            &notification.update,
+                        );
+                    }
                     if let Some(event) = event_from_update(notification.update) {
-                        listener.on_event(notification.session_id.to_string(), event);
+                        listener.on_event(session_id, event);
                     }
                     Ok(())
                 },
@@ -482,6 +499,14 @@ impl AgentHub {
                 async move |request: acp::RequestPermissionRequest,
                             responder,
                             cx: ConnectionTo<Agent>| {
+                    let json = serde_json::to_value(&request).unwrap_or_default();
+                    let allow = auto_allow(kind, &json, &mut lock(&shared).own_codex_calls);
+                    if let Some(option_id) = allow {
+                        let outcome = acp::RequestPermissionOutcome::Selected(
+                            acp::SelectedPermissionOutcome::new(option_id),
+                        );
+                        return responder.respond(acp::RequestPermissionResponse::new(outcome));
+                    }
                     let session_id = request.session_id.to_string();
                     let (reply, answer) = oneshot::channel();
                     let request_id = {
@@ -532,6 +557,90 @@ impl AgentHub {
                 },
                 agent_client_protocol::on_receive_request!(),
             )
+    }
+}
+
+/// The error to show when `error` means the user isn't signed in. Claude
+/// reports it only on the first prompt; `session/new` succeeds regardless.
+fn signed_out(kind: AgentKind, error: &agent_client_protocol::Error) -> Option<CoreError> {
+    (error.code == ErrorCode::AUTH_REQUIRED).then(|| {
+        CoreError::Agent(format!(
+            "{} isn't signed in. Run `{}` in a terminal, log in, then try again.",
+            kind.name(),
+            kind.login_command()
+        ))
+    })
+}
+
+/// The option to answer with, without asking, when `request` (a
+/// `session/request_permission`) is for one of the app's own MCP tools: its
+/// `allow_once` option, never `allow_always`, which could write to the
+/// user's agent config. Each adapter identifies an MCP tool differently.
+fn auto_allow(
+    kind: AgentKind,
+    request: &serde_json::Value,
+    own_codex_calls: &mut HashSet<(String, String)>,
+) -> Option<String> {
+    let tool_call = &request["toolCall"];
+    let ours = match kind {
+        // claude-agent-acp names the tool and its server in `_meta`. Source
+        // "dynamic" is a server from session/new; a same-named server from the
+        // user's own config has another source, so it isn't trusted.
+        AgentKind::Claude => {
+            let meta = &tool_call["_meta"]["claudeCode"];
+            meta["mcpServer"]["name"] == MCP_SERVER_NAME
+                && meta["mcpServer"]["source"] == "dynamic"
+                && MCP_TOOLS
+                    .iter()
+                    .any(|tool| meta["toolName"] == format!("mcp__{MCP_SERVER_NAME}__{tool}"))
+        }
+        // codex-acp's approval names neither server nor tool, only the id of
+        // the tool call it announced just before (see `track_own_codex_call`).
+        AgentKind::Codex => {
+            let key = (
+                request["sessionId"].as_str().unwrap_or_default().to_owned(),
+                tool_call["toolCallId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+            request["_meta"]["is_mcp_tool_approval"] == true && own_codex_calls.remove(&key)
+        }
+    };
+    let options = request["options"].as_array().filter(|_| ours)?;
+    let allow_once = options
+        .iter()
+        .find(|option| option["kind"] == "allow_once")?;
+    allow_once["optionId"].as_str().map(str::to_owned)
+}
+
+/// Remembers Codex calls to the app's own MCP tools until they finish. Codex
+/// fills `rawInput` from the MCP call itself, not from model output.
+fn track_own_codex_call(
+    own_codex_calls: &mut HashSet<(String, String)>,
+    session_id: &str,
+    update: &acp::SessionUpdate,
+) {
+    match update {
+        acp::SessionUpdate::ToolCall(call) => {
+            let call_json = serde_json::to_value(call).unwrap_or_default();
+            let input = &call_json["rawInput"];
+            if call_json["_meta"]["is_mcp_tool_call"] == true
+                && input["server"] == MCP_SERVER_NAME
+                && MCP_TOOLS.iter().any(|tool| input["tool"] == *tool)
+            {
+                own_codex_calls.insert((session_id.to_owned(), call.tool_call_id.to_string()));
+            }
+        }
+        acp::SessionUpdate::ToolCallUpdate(update)
+            if matches!(
+                update.fields.status,
+                Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+            ) =>
+        {
+            own_codex_calls.remove(&(session_id.to_owned(), update.tool_call_id.to_string()));
+        }
+        _ => {}
     }
 }
 
@@ -653,12 +762,21 @@ fn event_from_update(update: acp::SessionUpdate) -> Option<AgentEvent> {
             kind: wire_name(&call.kind),
             status: call.status.into(),
         },
-        Update::ToolCallUpdate(update) => AgentEvent::ToolCallUpdate {
-            id: update.tool_call_id.to_string(),
-            title: update.fields.title,
-            status: update.fields.status.map(Into::into),
-            text: update.fields.content.and_then(render_content),
-        },
+        Update::ToolCallUpdate(update) => {
+            let title = update.fields.title;
+            let status = update.fields.status.map(Into::into);
+            let text = update.fields.content.and_then(render_content);
+            // Claude streams many updates that only grow rawInput, which the UI doesn't show.
+            if title.is_none() && status.is_none() && text.is_none() {
+                return None;
+            }
+            AgentEvent::ToolCallUpdate {
+                id: update.tool_call_id.to_string(),
+                title,
+                status,
+                text,
+            }
+        }
         Update::Plan(plan) => AgentEvent::Plan {
             entries: plan
                 .entries
@@ -745,8 +863,10 @@ mod tests {
 
     /// An in-process ACP agent. Each prompt says "pong", asks for permission,
     /// echoes the chosen option id ("cancelled" if none) and ends the turn.
-    /// The prompt "crash" kills the connection instead. Session ids echo the
-    /// first MCP server, and the cwd "/signed-out" fails with auth_required.
+    /// The prompt "own tool" asks the way Claude does for the app's
+    /// draft_comment, "crash" kills the connection and "signed out" fails with
+    /// auth_required. Session ids echo the first MCP server, and the cwd
+    /// "/signed-out" fails with auth_required.
     fn fake_agent() -> impl ConnectTo<Client> {
         Agent
             .v1()
@@ -785,6 +905,10 @@ mod tests {
                         // A failed task shuts the connection down.
                         return cx.spawn(async { Err(Error::internal_error()) });
                     }
+                    if request.prompt == [acp::ContentBlock::from("signed out")] {
+                        return responder.respond_with_error(Error::auth_required());
+                    }
+                    let own_tool = request.prompt == [acp::ContentBlock::from("own tool")];
                     let session_id = request.session_id;
                     let task_cx = cx.clone();
                     cx.spawn(async move {
@@ -796,10 +920,15 @@ mod tests {
                             ))
                         };
                         say("pong")?;
-                        let tool = acp::ToolCallUpdate::new(
+                        let mut tool = acp::ToolCallUpdate::new(
                             "tool-1",
                             acp::ToolCallUpdateFields::new().title("Run cargo test".to_string()),
                         );
+                        if own_tool {
+                            tool = tool.meta(
+                                serde_json::from_str::<acp::Meta>(CLAUDE_OWN_TOOL_META).unwrap(),
+                            );
+                        }
                         let options = vec![
                             acp::PermissionOption::new(
                                 "yes",
@@ -953,6 +1082,143 @@ mod tests {
             error.to_string(),
             "Agent error: Codex isn't signed in. Run `codex login` in a terminal, log in, then try again."
         );
+
+        // Claude opens sessions while signed out and fails the first prompt.
+        let session = hub
+            .new_session(AgentKind::Claude, "/tmp".into(), vec![])
+            .await
+            .unwrap();
+        let error = hub.prompt(session, "signed out".into()).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Agent error: Claude isn't signed in. Run `claude` in a terminal, log in, then try again."
+        );
+    }
+
+    #[tokio::test]
+    async fn allows_own_mcp_tools_without_asking() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Claude, "/tmp".into(), vec![])
+            .await
+            .unwrap();
+        let (turn_hub, turn_session) = (hub.clone(), session.clone());
+        let turn =
+            tokio::spawn(async move { turn_hub.prompt(turn_session, "own tool".into()).await });
+        assert_eq!(
+            events.recv().await,
+            Some((session.clone(), message("pong")))
+        );
+        // No PermissionRequest in between: the fake agent got "yes", its allow_once option.
+        assert_eq!(events.recv().await, Some((session, message("yes"))));
+        assert_eq!(turn.await.unwrap().unwrap(), "end_turn");
+    }
+
+    // Payloads as claude-agent-acp 0.112.0 and codex-acp 2.12.0 sent them on
+    // this machine. Codex auto-reviewed its calls here, so its approval is
+    // built from codex-acp's buildMcpPermissionRequest instead.
+    const CLAUDE_OWN_TOOL_META: &str = r#"{"claudeCode":{"toolName":"mcp__gh-viewer__draft_comment","mcpServer":{"name":"gh-viewer","source":"dynamic"}}}"#;
+    const CLAUDE_REQUEST: &str = r#"{"sessionId":"20ba6720-c7f6-4d44-b54a-4d9a32c1c7b8","toolCall":{"toolCallId":"toolu_01LddYFXH9tbGJTQsru6Y9Xc","kind":"other","status":"pending","title":"gh-viewer: draft_comment","name":"mcp__gh-viewer__draft_comment","content":[],"rawInput":{"path":"src/a.rs","line":1,"side":"RIGHT","body":"hi"},"_meta":{"claudeCode":{"toolName":"mcp__gh-viewer__draft_comment","mcpServer":{"name":"gh-viewer","source":"dynamic"}}}},"options":[{"optionId":"allow-once","name":"Yes","kind":"allow_once"},{"optionId":"reject","name":"No","kind":"reject_once"}]}"#;
+    const CODEX_TOOL_CALL: &str = r#"{"sessionId":"01a20fc9-a4ec-7160-8a45-6d7a3ed7f8fe","update":{"sessionUpdate":"tool_call","toolCallId":"exec-d4901259-bafe-42bd-a372-feeb14e2542b","title":"mcp.gh-viewer.draft_comment","kind":"execute","status":"in_progress","rawInput":{"server":"gh-viewer","tool":"draft_comment","arguments":{"path":"src/a.rs","line":1,"side":"RIGHT","body":"hi"}},"_meta":{"is_mcp_tool_call":true}}}"#;
+    const CODEX_REQUEST: &str = r#"{"sessionId":"01a20fc9-a4ec-7160-8a45-6d7a3ed7f8fe","toolCall":{"toolCallId":"exec-d4901259-bafe-42bd-a372-feeb14e2542b","kind":"execute","status":"pending"},"_meta":{"is_mcp_tool_approval":true},"options":[{"optionId":"allow_once","name":"Allow","kind":"allow_once"},{"optionId":"allow_always","name":"Always allow","kind":"allow_always"},{"optionId":"cancel","name":"Cancel","kind":"reject_once"}]}"#;
+
+    /// `payload` with each `(pointer, value)` replaced.
+    fn edited(payload: &str, edits: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_str(payload).unwrap();
+        for (pointer, replacement) in edits {
+            *value.pointer_mut(pointer).unwrap() = replacement.clone();
+        }
+        value
+    }
+
+    #[test]
+    fn matches_own_mcp_tools_as_claude_sends_them() {
+        let allow =
+            |request: &serde_json::Value, kind| auto_allow(kind, request, &mut HashSet::new());
+        let request = edited(CLAUDE_REQUEST, &[]);
+        assert_eq!(
+            allow(&request, AgentKind::Claude).as_deref(),
+            Some("allow-once")
+        );
+        // The Codex rule doesn't apply to Claude's payloads, nor the reverse.
+        assert_eq!(allow(&request, AgentKind::Codex), None);
+
+        let meta = "/toolCall/_meta/claudeCode";
+        let from_user_config = edited(
+            CLAUDE_REQUEST,
+            &[(&format!("{meta}/mcpServer/source"), "user".into())],
+        );
+        let other_server = edited(
+            CLAUDE_REQUEST,
+            &[
+                (&format!("{meta}/mcpServer/name"), "other".into()),
+                (
+                    &format!("{meta}/toolName"),
+                    "mcp__other__draft_comment".into(),
+                ),
+            ],
+        );
+        let other_tool = edited(
+            CLAUDE_REQUEST,
+            &[(&format!("{meta}/toolName"), "mcp__gh-viewer__merge".into())],
+        );
+        let bash = edited(
+            CLAUDE_REQUEST,
+            &[("/toolCall/_meta", serde_json::json!({}))],
+        );
+        let no_allow_once = edited(
+            CLAUDE_REQUEST,
+            &[("/options/0/kind", "allow_always".into())],
+        );
+        for request in [
+            from_user_config,
+            other_server,
+            other_tool,
+            bash,
+            no_allow_once,
+        ] {
+            assert_eq!(allow(&request, AgentKind::Claude), None, "{request}");
+        }
+    }
+
+    #[test]
+    fn matches_own_mcp_tools_as_codex_sends_them() {
+        let notification: acp::SessionNotification = serde_json::from_str(CODEX_TOOL_CALL).unwrap();
+        let session_id = notification.session_id.to_string();
+        let request = edited(CODEX_REQUEST, &[]);
+        let mut calls = HashSet::new();
+
+        // Unknown until the tool call is announced, then allowed once.
+        assert_eq!(auto_allow(AgentKind::Codex, &request, &mut calls), None);
+        track_own_codex_call(&mut calls, &session_id, &notification.update);
+        assert_eq!(
+            auto_allow(AgentKind::Codex, &request, &mut calls).as_deref(),
+            Some("allow_once")
+        );
+        assert_eq!(auto_allow(AgentKind::Codex, &request, &mut calls), None);
+
+        // Another server's tool of the same name isn't tracked.
+        let other: acp::SessionNotification = serde_json::from_value(edited(
+            CODEX_TOOL_CALL,
+            &[("/update/rawInput/server", "other".into())],
+        ))
+        .unwrap();
+        track_own_codex_call(&mut calls, &session_id, &other.update);
+        assert!(calls.is_empty());
+
+        // A finished call is forgotten.
+        track_own_codex_call(&mut calls, &session_id, &notification.update);
+        let done = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            "exec-d4901259-bafe-42bd-a372-feeb14e2542b",
+            acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+        ));
+        track_own_codex_call(&mut calls, &session_id, &done);
+        assert!(calls.is_empty());
+
+        // Only an MCP tool approval for a tracked call qualifies.
+        track_own_codex_call(&mut calls, &session_id, &notification.update);
+        let command = edited(CODEX_REQUEST, &[("/_meta", serde_json::json!({}))]);
+        assert_eq!(auto_allow(AgentKind::Codex, &command, &mut calls), None);
     }
 
     #[test]
