@@ -34,10 +34,12 @@ struct MenuView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    PRSection(title: "Review requested",
+                    PRSection(model: model,
+                              title: "Review requested",
                               pullRequests: dashboard.reviewRequested,
                               emptyText: "Nothing waiting on your review")
-                    PRSection(title: "My pull requests",
+                    PRSection(model: model,
+                              title: "My pull requests",
                               pullRequests: dashboard.authored,
                               emptyText: "You have no open pull requests")
                 }
@@ -59,6 +61,7 @@ struct MenuView: View {
 }
 
 private struct PRSection: View {
+    let model: AppModel
     let title: String
     let pullRequests: [PullRequest]
     let emptyText: String
@@ -81,21 +84,22 @@ private struct PRSection: View {
                 .padding(.vertical, 6)
         } else {
             ForEach(pullRequests, id: \.url) { pullRequest in
-                PRRow(pullRequest: pullRequest)
+                PRRow(model: model, pullRequest: pullRequest)
             }
         }
     }
 }
 
 private struct PRRow: View {
+    let model: AppModel
     let pullRequest: PullRequest
     @State private var isHovering = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button {
-            if let url = URL(string: pullRequest.url) {
-                NSWorkspace.shared.open(url)
-            }
+            model.selectedPullRequestURL = pullRequest.url
+            openWindow.reviewWindow()
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 ReviewIcon(decision: pullRequest.reviewDecision)
@@ -125,7 +129,14 @@ private struct PRRow: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 6)
         .onHover { isHovering = $0 }
-        .help("Open in browser")
+        .help("Open in GH Viewer")
+        .contextMenu {
+            Button("Open in Browser") {
+                if let url = URL(string: pullRequest.url) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
     }
 
     private var subtitle: String {
@@ -140,6 +151,7 @@ private struct PRRow: View {
 
 private struct FooterView: View {
     let model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 8) {
@@ -147,6 +159,14 @@ private struct FooterView: View {
             Spacer()
             RefreshButton(model: model)
                 .buttonStyle(.borderless)
+
+            Button("Open GH Viewer") {
+                model.selectedPullRequestURL = nil
+                openWindow.reviewWindow()
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("o")
+            .help("Open the review window (⌘O)")
 
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.borderless)
