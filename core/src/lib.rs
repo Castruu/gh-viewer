@@ -386,7 +386,7 @@ fn convert_search(search: Search) -> Result<Vec<PullRequest>, CoreError> {
         .collect::<Result<Vec<_>, _>>()?;
     // The query's `sort:updated-desc` uses GitHub's search index, which lags
     // behind `updatedAt`, so sort again on the real timestamps.
-    pull_requests.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    pull_requests.sort_by_key(|pr| std::cmp::Reverse(pr.updated_at));
     Ok(pull_requests)
 }
 
