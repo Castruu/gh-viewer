@@ -54,6 +54,10 @@ pub(crate) struct DraftCommentArgs {
     /// Which side of the diff `start_line` is on, with the same meaning as `side`.
     pub start_side: Option<DiffSide>,
     /// The comment in GitHub-flavored markdown. Cover one issue per comment.
+    /// To propose a concrete fix on RIGHT-side lines, include a ```suggestion
+    /// fenced block holding the full replacement for exactly the commented
+    /// lines; GitHub lets the author apply it with one click. Suggestions
+    /// don't work on LEFT-side lines.
     pub body: String,
 }
 
