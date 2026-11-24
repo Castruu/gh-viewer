@@ -73,7 +73,11 @@ between commits, not the working tree, so edits the agent makes never show up
 as part of the PR.
 
 Git auth uses `gh auth git-credential` as a per-command credential helper. No
-token is written to disk or into a remote URL.
+token is written to disk or into a remote URL. The app's git commands ignore
+your global and system git config (`GIT_CONFIG_GLOBAL=/dev/null`). Otherwise,
+URL rewrites to ssh, global hooks, LFS filters, and `diff.*` settings would
+break the checkouts or change the diff. Proxies set through `HTTPS_PROXY`
+still work. Proxy or CA settings in `~/.gitconfig` don't.
 
 **Ask about a selection.** You select a line range in one file. The app sends
 a prompt to the agent session for that PR. The prompt is a context packet:
