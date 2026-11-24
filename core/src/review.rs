@@ -652,6 +652,69 @@ mod tests {
         assert_eq!(truncate("short", 10), ("short", false));
     }
 
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<AgentEvent>>);
+
+    impl AgentListener for Recorder {
+        fn on_event(&self, _session_id: String, event: AgentEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    /// The whole path on a real public PR: open, start Claude with the app's MCP
+    /// tools, ask it to draft on a selected line, and check the draft. Writes only to a temp dir.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs network, a gh login and a signed-in Claude Code"]
+    async fn live_claude_drafts_a_comment_through_mcp() {
+        live_agent_drafts_a_comment(AgentKind::Claude).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs network, a gh login and a signed-in Codex"]
+    async fn live_codex_drafts_a_comment_through_mcp() {
+        live_agent_drafts_a_comment(AgentKind::Codex).await;
+    }
+
+    async fn live_agent_drafts_a_comment(kind: AgentKind) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let drafts = Arc::new(DraftStore::new(root.clone()));
+        let recorder = Arc::new(Recorder::default());
+        let hub = ReviewHub::new(root, Arc::new(GitHubClient::new()), drafts.clone(), recorder.clone());
+        let repo = "octocat/Hello-World".to_string();
+
+        let review = hub.open(repo.clone(), 1).await.unwrap();
+        let (path, line) = review
+            .files
+            .iter()
+            .flat_map(|file| file.hunks.iter().flat_map(|hunk| &hunk.lines).map(move |line| (file, line)))
+            .find_map(|(file, line)| line.new_line.map(|n| (file.path.clone(), n)))
+            .expect("the PR has a line on the right side");
+
+        let session = hub.start_agent(kind, repo.clone(), 1).await.unwrap();
+        let selection = Selection { path: path.clone(), start_line: line, start_side: DiffSide::Right, line, side: DiffSide::Right };
+        let stop = hub
+            .ask(
+                session,
+                Some(selection),
+                "Use the gh-viewer draft_comment tool to draft exactly one comment on the selected line, with the body `live test`. Use no other tools.".into(),
+            )
+            .await
+            .unwrap();
+
+        let events = recorder.0.lock().unwrap().clone();
+        assert_eq!(stop, "end_turn", "events: {events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })),
+            "the app's own tool should be allowed without asking: {events:?}"
+        );
+        let stored = drafts.list(repo, 1).unwrap();
+        assert_eq!(stored.len(), 1, "events: {events:?}");
+        assert_eq!((stored[0].path.as_str(), stored[0].line), (path.as_str(), line));
+        assert_eq!(stored[0].author, DraftAuthor::Agent { name: agent_name(kind).into() });
+        assert_eq!(stored[0].commit_oid, review.checkout.head_oid);
+    }
+
     #[test]
     fn agent_drafts_land_in_the_store_pinned_to_the_head() {
         let dir = tempfile::tempdir().unwrap();
