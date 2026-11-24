@@ -19,7 +19,9 @@ edit and submit those.
 | 3 | Line-based unified diff only. No structural (difftastic-style) diff and no split view in v1. |
 | 4 | "Viewed" per file syncs with GitHub's own state (`viewerViewedState`, `markFileAsViewed`). |
 | 5 | The agent drafts comments through an MCP server that the app serves over HTTP on localhost. Drafts stay local until you submit. Every draft is checked against the diff. |
-| 6 | The app passes through each agent's own permission settings and adds no default of its own. Permission requests show in the chat. |
+| 5a | Drafts are pinned to the commit they were written against. While a PR has drafts, its diff stays on that commit, with a "new commits pushed" banner, and the review is submitted against it. Submitting or discarding the drafts moves the diff to the latest head. |
+| 5b | If you already have a pending review on github.com, submitting adds your drafts to it and submits it. Retries skip comments that are already in it. |
+| 6 | The app passes through each agent's own permission settings and adds no default of its own. Permission requests show in the chat. The one exception: calls to the app's own MCP tools (`get_pr_context`, `list_review_threads`, `draft_comment`) are allowed once automatically, because they're local and reversible. |
 | 7 | We build the chat UI (streaming text, tool calls, permission prompts) and a diff view that stays fast on large PRs. |
 | 8 | The app never shows a login and never touches agent credentials. The user signs in to `claude` or `codex` themselves, and API keys work through the environment. The name doesn't use "Claude Code"; plain text like "works with Claude Code and Codex" is fine. |
 
@@ -90,13 +92,18 @@ the comment to the PR's local drafts, and the UI shows it right away. The agent
 can never post to GitHub.
 
 **Submit.** One `addPullRequestReview` mutation carries the event (approve,
-request changes, or comment), the body, `commitOID` set to the head you
-reviewed, and every draft as a `DraftPullRequestReviewThread`. Drafts are
-deleted only after GitHub accepts the review.
+request changes, or comment), the body, `commitOID` set to the drafts' pinned
+commit, and every draft as a `DraftPullRequestReviewThread`. If you already
+have a pending review on GitHub, each draft is added to it with
+`addPullRequestReviewThread`, skipping any already there, and then
+`submitPullRequestReview` submits it. Drafts are deleted only after GitHub
+accepts the review.
 
 **Permissions.** ACP `session/request_permission` shows up as a prompt in the
 chat with the agent's own options. The app answers only what you pick, or
-cancels if the session ends.
+cancels if the session ends. The exception is the app's own three MCP tools,
+which are answered with `allow_once`, never `allow_always`, so nothing is
+written to the agent's config.
 
 ## Agents
 
