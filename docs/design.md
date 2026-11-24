@@ -23,6 +23,7 @@ edit and submit those.
 | 5b | If you already have a pending review on github.com, submitting adds your drafts to it and submits it. Retries skip comments that are already in it. |
 | 6 | The app passes through each agent's own permission settings and adds no default of its own. Permission requests show in the chat. The one exception: calls to the app's own MCP tools (`get_pr_context`, `list_review_threads`, `draft_comment`) are allowed once automatically, because they're local and reversible. |
 | 7 | We build the chat UI (streaming text, tool calls, permission prompts) and a diff view that stays fast on large PRs. |
+| 7a | Themes: Argus's four palettes (Cool by default, Soft, Focus, Vivid) set the accent colors: statuses, the waiting dot, repo names, diff tints, selection and agent drafts. Each palette has a dark variant (Argus's colors) and a light variant. A separate Appearance setting picks System, Light or Dark. Both are chosen from the palette button in the toolbar (click for the next palette, hold to choose) and remembered. |
 | 8 | The app never shows a login and never touches agent credentials. The user signs in to `claude` or `codex` themselves, and API keys work through the environment. The name doesn't use "Claude Code"; plain text like "works with Claude Code and Codex" is fine. |
 
 ## Architecture
