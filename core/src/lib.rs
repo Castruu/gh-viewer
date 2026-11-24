@@ -11,7 +11,7 @@ uniffi::setup_scaffolding!();
 
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
-/// Both dashboard lists in a single round trip. `archived:false` hides PRs in
+/// All dashboard lists in a single round trip. `archived:false` hides PRs in
 /// archived repos, which can never be merged or reviewed anyway.
 const DASHBOARD_QUERY: &str = r#"
 query {
@@ -20,6 +20,11 @@ query {
     nodes { ...pr }
   }
   reviewRequested: search(query: "is:pr is:open archived:false review-requested:@me sort:updated-desc", type: ISSUE, first: 50) {
+    nodes { ...pr }
+  }
+  # GitHub drops your review request once you review, so without this a PR
+  # disappears from the app right after you review it.
+  reviewedByMe: search(query: "is:pr is:open archived:false reviewed-by:@me sort:updated-desc", type: ISSUE, first: 50) {
     nodes { ...pr }
   }
 }
@@ -102,6 +107,9 @@ pub struct Dashboard {
     pub viewer_login: String,
     pub authored: Vec<PullRequest>,
     pub review_requested: Vec<PullRequest>,
+    /// Open PRs the viewer has already reviewed. May overlap `review_requested`
+    /// when the author re-requests a review.
+    pub reviewed_by_me: Vec<PullRequest>,
     /// Errors GitHub returned alongside the data, e.g. an org hiding its PRs
     /// behind SAML SSO. Non-empty means the lists may be incomplete.
     pub warnings: Vec<String>,
@@ -127,13 +135,27 @@ impl GitHubClient {
 
     /// Fetches the viewer's open PRs and the PRs awaiting their review.
     pub async fn fetch_dashboard(&self) -> Result<Dashboard, CoreError> {
+        let body = self.graphql(DASHBOARD_QUERY, serde_json::Value::Null).await?;
+        parse_dashboard(&body)
+    }
+}
+
+impl GitHubClient {
+    /// Posts a GraphQL request and returns the raw body of a 2xx response.
+    /// GraphQL-level `errors` are left for the caller, which knows whether
+    /// partial data is usable.
+    pub(crate) async fn graphql(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<String, CoreError> {
         // Read the token on every call so `gh auth login`/`switch` takes effect without a restart.
         let token = gh_token().await?;
         let response = self
             .http
             .post(GRAPHQL_URL)
             .bearer_auth(token)
-            .json(&serde_json::json!({ "query": DASHBOARD_QUERY }))
+            .json(&serde_json::json!({ "query": query, "variables": variables }))
             .send()
             .await
             .map_err(|e| CoreError::Network(e.to_string()))?;
@@ -150,7 +172,7 @@ impl GitHubClient {
         if !status.is_success() {
             return Err(http_error(status, &body));
         }
-        parse_dashboard(&body)
+        Ok(body)
     }
 }
 
@@ -173,14 +195,17 @@ impl Default for GitHubClient {
     }
 }
 
-async fn gh_token() -> Result<String, CoreError> {
-    let gh = GH_CANDIDATES
+/// Path to the `gh` binary, or plain "gh" for a PATH lookup.
+pub(crate) fn gh_path() -> &'static str {
+    GH_CANDIDATES
         .iter()
         .copied()
         .find(|path| Path::new(path).exists())
-        .unwrap_or("gh");
+        .unwrap_or("gh")
+}
 
-    let command = tokio::process::Command::new(gh)
+pub(crate) async fn gh_token() -> Result<String, CoreError> {
+    let command = tokio::process::Command::new(gh_path())
         .args(["auth", "token"])
         // Make sure a timed-out gh doesn't linger.
         .kill_on_drop(true)
@@ -223,6 +248,7 @@ struct Data {
     viewer: Viewer,
     authored: Search,
     review_requested: Search,
+    reviewed_by_me: Search,
 }
 
 #[derive(Deserialize)]
@@ -308,6 +334,7 @@ fn parse_dashboard(body: &str) -> Result<Dashboard, CoreError> {
         viewer_login: data.viewer.login,
         authored: convert_search(data.authored)?,
         review_requested: convert_search(data.review_requested)?,
+        reviewed_by_me: convert_search(data.reviewed_by_me)?,
         warnings: messages,
     })
 }
@@ -391,16 +418,26 @@ mod tests {
             "repository": { "nameWithOwner": "x/y" }, "author": null,
             "commits": { "nodes": [ { "commit": { "statusCheckRollup": { "state": "ERROR" } } } ] }
           }
+        ] },
+        "reviewedByMe": { "nodes": [
+          {
+            "number": 3, "title": "Refactor", "url": "https://github.com/x/y/pull/3",
+            "isDraft": false, "updatedAt": "2026-10-30T00:00:00Z", "reviewDecision": "REVIEW_REQUIRED",
+            "repository": { "nameWithOwner": "x/y" }, "author": { "login": "hubot" },
+            "commits": { "nodes": [] }
+          }
         ] }
       }
     }"#;
 
     #[test]
-    fn parses_both_lists() {
+    fn parses_all_lists() {
         let dashboard = parse_dashboard(FULL_RESPONSE).unwrap();
         assert_eq!(dashboard.viewer_login, "octocat");
         assert_eq!(dashboard.authored.len(), 2);
         assert_eq!(dashboard.review_requested.len(), 1);
+        assert_eq!(dashboard.reviewed_by_me.len(), 1);
+        assert_eq!(dashboard.reviewed_by_me[0].author.as_deref(), Some("hubot"));
 
         let first = &dashboard.authored[0];
         assert_eq!(first.number, 12);
@@ -437,7 +474,8 @@ mod tests {
           "data": {
             "viewer": { "login": "octocat" },
             "authored": { "nodes": [ null ] },
-            "reviewRequested": { "nodes": [] }
+            "reviewRequested": { "nodes": [] },
+            "reviewedByMe": { "nodes": [] }
           },
           "errors": [ { "message": "Resource protected by organization SAML enforcement." } ]
         }"#;
@@ -457,7 +495,8 @@ mod tests {
           "data": {
             "viewer": { "login": "octocat" },
             "authored": { "nodes": [ null, null ] },
-            "reviewRequested": { "nodes": [] }
+            "reviewRequested": { "nodes": [] },
+            "reviewedByMe": { "nodes": [] }
           },
           "errors": [ { "message": "SAML" }, { "message": "SAML" } ]
         }"#;
@@ -508,7 +547,8 @@ mod tests {
         let body = format!(
             r#"{{ "data": {{ "viewer": {{ "login": "octocat" }},
                  "authored": {{ "nodes": [ {}, {}, {} ] }},
-                 "reviewRequested": {{ "nodes": [] }} }} }}"#,
+                 "reviewRequested": {{ "nodes": [] }},
+                 "reviewedByMe": {{ "nodes": [] }} }} }}"#,
             node(1, "2026-10-20T18:45:45Z"),
             node(2, "2026-10-26T14:39:50Z"),
             node(3, "2026-10-21T15:53:32Z"),
