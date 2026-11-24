@@ -625,3 +625,606 @@ pub(crate) fn is_commentable(files: &[DiffFile], path: &str, side: DiffSide, lin
             DiffSide::Right => l.new_line == Some(line),
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use LineKind::{Added, Context, Removed};
+
+    /// Real output of the `diff` command above, with `<TAB>` for the tab git adds
+    /// after `---`/`+++` paths that contain a space.
+    const REAL_DIFF: &str = r#"diff --git a/café.txt b/café.txt
+index ea17b16..572eb43 100644
+--- a/café.txt
++++ b/café.txt
+@@ -1 +1 @@
+-cafe
++café
+diff --git a/deleted.txt b/deleted.txt
+deleted file mode 100644
+index d3bc718..0000000
+--- a/deleted.txt
++++ /dev/null
+@@ -1,2 +0,0 @@
+-gone
+-bye
+diff --git a/empty.txt b/empty.txt
+new file mode 100644
+index 0000000..e69de29
+diff --git a/image.bin b/image.bin
+new file mode 100644
+index 0000000..36b8a98
+Binary files /dev/null and b/image.bin differ
+diff --git a/modified.txt b/modified.txt
+index 4e258e3..ada7c2d 100644
+--- a/modified.txt
++++ b/modified.txt
+@@ -1,5 +1,5 @@
+ l1
+-l2
++L2
+ l3
+ l4
+ l5
+@@ -7,6 +7,6 @@ l6
+ l7
+ l8
+ l9
+--- dashes
++++ pluses
+ l11
+-last
+\ No newline at end of file
++LAST
+\ No newline at end of file
+diff --git a/pure.txt b/moved/pure.txt
+similarity index 100%
+rename from pure.txt
+rename to moved/pure.txt
+diff --git a/old name.txt b/new name.txt
+similarity index 83%
+rename from old name.txt
+rename to new name.txt
+index 0fdf397..e0318ee 100644
+--- a/old name.txt<TAB>
++++ b/new name.txt<TAB>
+@@ -3,4 +3,4 @@ b
+ c
+ d
+ e
+-f
++F
+diff --git a/one.txt b/one.txt
+index 5626abf..e438487 100644
+--- a/one.txt
++++ b/one.txt
+@@ -1 +1 @@
+-one
++uno
+diff --git "a/q\"uote.txt" "b/q\"uote.txt"
+new file mode 100644
+index 0000000..8e8a849
+--- /dev/null
++++ "b/q\"uote.txt"
+@@ -0,0 +1 @@
++q"uote
+diff --git a/script.sh b/script.sh
+old mode 100644
+new mode 100755
+diff --git "a/tab\tfile.txt" "b/tab\tfile.txt"
+index 587be6b..975fbec 100644
+--- "a/tab\tfile.txt"
++++ "b/tab\tfile.txt"
+@@ -1 +1 @@
+-x
++y
+"#;
+
+    fn real_diff() -> Vec<DiffFile> {
+        parse_diff(&REAL_DIFF.replace("<TAB>", "\t"))
+    }
+
+    fn file<'a>(files: &'a [DiffFile], path: &str) -> &'a DiffFile {
+        files
+            .iter()
+            .find(|f| f.path == path)
+            .unwrap_or_else(|| panic!("no {path:?} in the diff"))
+    }
+
+    fn line(kind: LineKind, old_line: Option<u32>, new_line: Option<u32>, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            old_line,
+            new_line,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn parses_every_file() {
+        let paths: Vec<_> = real_diff().into_iter().map(|f| f.path).collect();
+        assert_eq!(
+            paths,
+            [
+                "café.txt",
+                "deleted.txt",
+                "empty.txt",
+                "image.bin",
+                "modified.txt",
+                "moved/pure.txt",
+                "new name.txt",
+                "one.txt",
+                "q\"uote.txt",
+                "script.sh",
+                "tab\tfile.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_multiple_hunks_with_header_like_content_and_no_newline_markers() {
+        let files = real_diff();
+        let modified = file(&files, "modified.txt");
+        assert_eq!(modified.status, FileStatus::Modified);
+        assert_eq!(modified.old_path, None);
+        assert_eq!(modified.hunks.len(), 2);
+
+        let first = &modified.hunks[0];
+        assert_eq!(first.header, "@@ -1,5 +1,5 @@");
+        assert_eq!(
+            first.lines[..3],
+            [
+                line(Context, Some(1), Some(1), "l1"),
+                line(Removed, Some(2), None, "l2"),
+                line(Added, None, Some(2), "L2"),
+            ]
+        );
+
+        let second = &modified.hunks[1];
+        assert_eq!(second.header, "@@ -7,6 +7,6 @@ l6");
+        assert_eq!(
+            (
+                second.old_start,
+                second.old_count,
+                second.new_start,
+                second.new_count
+            ),
+            (7, 6, 7, 6)
+        );
+        assert_eq!(
+            second.lines,
+            [
+                line(Context, Some(7), Some(7), "l7"),
+                line(Context, Some(8), Some(8), "l8"),
+                line(Context, Some(9), Some(9), "l9"),
+                line(Removed, Some(10), None, "-- dashes"),
+                line(Added, None, Some(10), "++ pluses"),
+                line(Context, Some(11), Some(11), "l11"),
+                line(Removed, Some(12), None, "last"),
+                line(Added, None, Some(12), "LAST"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_omitted_hunk_counts_as_one() {
+        let files = real_diff();
+        let hunk = &file(&files, "one.txt").hunks[0];
+        assert_eq!(
+            (
+                hunk.old_start,
+                hunk.old_count,
+                hunk.new_start,
+                hunk.new_count
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(
+            hunk.lines,
+            [
+                line(Removed, Some(1), None, "one"),
+                line(Added, None, Some(1), "uno")
+            ]
+        );
+        // Non-ASCII paths stay unquoted with core.quotePath=false.
+        assert_eq!(file(&files, "café.txt").hunks[0].lines[1].text, "café");
+    }
+
+    #[test]
+    fn parses_added_and_deleted_files() {
+        let files = real_diff();
+        let deleted = file(&files, "deleted.txt");
+        assert_eq!(deleted.status, FileStatus::Deleted);
+        assert_eq!(deleted.old_path, None);
+        assert_eq!(
+            deleted.hunks[0].lines,
+            [
+                line(Removed, Some(1), None, "gone"),
+                line(Removed, Some(2), None, "bye"),
+            ]
+        );
+
+        let empty = file(&files, "empty.txt");
+        assert_eq!(
+            (empty.status, empty.is_binary, empty.hunks.len()),
+            (FileStatus::Added, false, 0)
+        );
+
+        let quoted = file(&files, "q\"uote.txt");
+        assert_eq!(quoted.status, FileStatus::Added);
+        assert_eq!(
+            quoted.hunks[0].lines,
+            [line(Added, None, Some(1), "q\"uote")]
+        );
+    }
+
+    #[test]
+    fn parses_binary_and_mode_only_changes() {
+        let files = real_diff();
+        let image = file(&files, "image.bin");
+        assert_eq!(
+            (image.status, image.is_binary, image.hunks.len()),
+            (FileStatus::Added, true, 0)
+        );
+
+        let script = file(&files, "script.sh");
+        assert_eq!(
+            (script.status, script.is_binary, script.hunks.len()),
+            (FileStatus::Modified, false, 0)
+        );
+    }
+
+    #[test]
+    fn parses_renames() {
+        let files = real_diff();
+        let pure = file(&files, "moved/pure.txt");
+        assert_eq!(pure.status, FileStatus::Renamed);
+        assert_eq!(pure.old_path.as_deref(), Some("pure.txt"));
+        assert!(pure.hunks.is_empty());
+
+        let edited = file(&files, "new name.txt");
+        assert_eq!(edited.status, FileStatus::Renamed);
+        assert_eq!(edited.old_path.as_deref(), Some("old name.txt"));
+        assert_eq!(edited.hunks[0].header, "@@ -3,4 +3,4 @@ b");
+        assert_eq!(
+            edited.hunks[0].lines[3..],
+            [
+                line(Removed, Some(6), None, "f"),
+                line(Added, None, Some(6), "F"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unquotes_c_quoted_paths() {
+        let files = real_diff();
+        assert_eq!(file(&files, "tab\tfile.txt").hunks[0].lines.len(), 2);
+
+        // As git writes them with core.quotePath on: octal bytes, escaped quotes and backslashes.
+        let diff = r#"diff --git "a/caf\303\251 \"old\".txt" "b/caf\303\251 \\new\\.txt"
+similarity index 100%
+rename from "caf\303\251 \"old\".txt"
+rename to "caf\303\251 \\new\\.txt"
+diff --git "a/bin\tary" "b/bin\tary"
+index 1234567..89abcde 100644
+Binary files "a/bin\tary" and "b/bin\tary" differ
+"#;
+        let files = parse_diff(diff);
+        assert_eq!(files[0].path, r"café \new\.txt");
+        assert_eq!(files[0].old_path.as_deref(), Some("café \"old\".txt"));
+        assert_eq!(files[0].status, FileStatus::Renamed);
+        // The `diff --git` line is the only source of the path here.
+        assert_eq!(files[1].path, "bin\tary");
+        assert!(files[1].is_binary);
+    }
+
+    #[test]
+    fn falls_back_to_the_git_header_for_paths_with_spaces() {
+        let diff = "diff --git a/x b/y b/x b/y\nold mode 100644\nnew mode 100755\n";
+        assert_eq!(parse_diff(diff)[0].path, "x b/y");
+    }
+
+    #[test]
+    fn parses_an_empty_diff() {
+        assert!(parse_diff("").is_empty());
+    }
+
+    #[test]
+    fn commentable_lines_follow_github_sides() {
+        use DiffSide::{Left, Right};
+        let files = real_diff();
+        let ok = |path, side, line| is_commentable(&files, path, side, line);
+
+        // Context lines are commentable on both sides, changed lines only on their own.
+        assert!(ok("modified.txt", Left, 1) && ok("modified.txt", Right, 1));
+        assert!(ok("modified.txt", Left, 2) && ok("modified.txt", Right, 2));
+        assert!(ok("modified.txt", Left, 10) && ok("modified.txt", Right, 10));
+        // Line 6 sits between the two hunks; 13 is past the end.
+        assert!(!ok("modified.txt", Right, 6) && !ok("modified.txt", Left, 6));
+        assert!(!ok("modified.txt", Right, 13));
+
+        assert!(ok("deleted.txt", Left, 1) && !ok("deleted.txt", Right, 1));
+        assert!(ok("q\"uote.txt", Right, 1) && !ok("q\"uote.txt", Left, 1));
+        // Renamed files take the new path on both sides.
+        assert!(ok("new name.txt", Left, 6) && ok("new name.txt", Right, 3));
+        assert!(!ok("old name.txt", Left, 6));
+        assert!(!ok("image.bin", Right, 1) && !ok("script.sh", Right, 1));
+        assert!(!ok("missing.txt", Right, 1));
+    }
+
+    #[test]
+    fn rejects_repos_that_arent_owner_slash_name() {
+        let manager = CheckoutManager::new("/data".into());
+        for repo in [
+            "", "a", "a/", "/b", "a/b/c", "../b", "a/..", "a/.", "a b/c", "a\\b/c",
+        ] {
+            assert!(
+                manager.paths(repo, 1).is_err(),
+                "{repo:?} should be rejected"
+            );
+        }
+        let paths = manager.paths("rust-lang/rust.vim", 7).unwrap();
+        assert_eq!(paths.url, "https://github.com/rust-lang/rust.vim.git");
+        assert_eq!(paths.bare, "/data/repos/rust-lang/rust.vim.git");
+        assert_eq!(paths.worktree, "/data/worktrees/rust-lang/rust.vim/7");
+    }
+
+    #[test]
+    fn explains_repos_the_token_cant_read() {
+        let error = remote_error("o/secret", "Couldn't clone o/secret".into())(
+            "remote: Repository not found.\nfatal: repository 'https://github.com/o/secret.git/' not found".into(),
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("Git error: Can't access o/secret on GitHub."),
+            "{error}"
+        );
+
+        let error = remote_error("o/r", "Couldn't fetch".into())("fatal: boom".into());
+        assert_eq!(error.to_string(), "Git error: Couldn't fetch: fatal: boom");
+    }
+
+    // --- Against a local remote -----------------------------------------------
+
+    /// Runs git in `dir` for fixture setup and returns its trimmed stdout.
+    fn run(dir: &str, args: &[&str]) -> String {
+        let output = std::process::Command::new(git_path())
+            .args(["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {args:?} failed: {stderr}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// Writes `files` in the work repo `dir`, commits them and returns the commit.
+    fn commit(dir: &str, files: &[(&str, &str)]) -> String {
+        for (path, content) in files {
+            std::fs::write(format!("{dir}/{path}"), content).unwrap();
+        }
+        run(dir, &["add", "-A"]);
+        run(dir, &["commit", "-q", "-m", "change"]);
+        run(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn read(dir: &str, path: &str) -> String {
+        std::fs::read_to_string(format!("{dir}/{path}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn prepares_and_moves_worktrees_from_a_local_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().to_str().unwrap();
+        let remote = format!("{tmp}/remote/octo/demo.git");
+        let work = format!("{tmp}/work");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run(&remote, &["init", "-q", "--bare"]);
+        run(&remote, &["config", "uploadpack.allowFilter", "true"]);
+        run(&work, &["init", "-q", "-b", "main"]);
+
+        let base = commit(&work, &[("a.txt", "one\ntwo\n"), ("b.txt", "keep\n")]);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/heads/main"]);
+        let head = commit(&work, &[("a.txt", "one\nTWO\n"), ("c.txt", "new\n")]);
+        run(
+            &work,
+            &[
+                "push",
+                "-q",
+                &remote,
+                "HEAD:refs/pull/1/head",
+                "HEAD:refs/pull/2/head",
+            ],
+        );
+        // The base branch moves on after the PR branched off.
+        run(&work, &["checkout", "-q", &base]);
+        let base_tip = commit(&work, &[("b.txt", "kept\n")]);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/heads/main"]);
+
+        let manager = CheckoutManager::with_remote_base(
+            format!("{tmp}/data"),
+            format!("file://{tmp}/remote/"),
+        );
+        let prepare = |number, pin: Option<&str>| {
+            manager.prepare(
+                "octo/demo".into(),
+                number,
+                "main".into(),
+                pin.map(Into::into),
+            )
+        };
+        // Two PRs of one repo at once: the lock keeps their clones and fetches apart.
+        let (first, second) = tokio::join!(prepare(1, None), prepare(2, None));
+        let first = first.unwrap();
+        second.unwrap();
+        assert_eq!(first.latest_head_oid, head);
+        assert_eq!(
+            first.worktree_path,
+            format!("{tmp}/data/worktrees/octo/demo/1")
+        );
+        assert_eq!(
+            (&first.head_oid, &first.base_oid, &first.merge_base_oid),
+            (&head, &base_tip, &base)
+        );
+        assert_eq!(read(&first.worktree_path, "a.txt"), "one\nTWO\n");
+        // Blobless, so the checkout above already fetched blobs lazily.
+        let bare = format!("{tmp}/data/repos/octo/demo.git");
+        assert_eq!(
+            run(&bare, &["config", "remote.origin.partialclonefilter"]),
+            "blob:none"
+        );
+        assert!(!Path::new(&format!("{bare}.partial")).exists());
+
+        let files = manager.diff(first.clone()).await.unwrap();
+        let summary: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.status)).collect();
+        // b.txt changed only on the base, so like on GitHub it isn't part of the PR.
+        assert_eq!(
+            summary,
+            [
+                ("a.txt", FileStatus::Modified),
+                ("c.txt", FileStatus::Added)
+            ]
+        );
+        assert_eq!(
+            files[0].hunks[0].lines[1],
+            line(Removed, Some(2), None, "two")
+        );
+
+        // Same head: the agent's edits stay.
+        std::fs::write(format!("{}/a.txt", first.worktree_path), "agent edit\n").unwrap();
+        std::fs::write(
+            format!("{}/cache.tmp", first.worktree_path),
+            "build cache\n",
+        )
+        .unwrap();
+        let again = prepare(1, None).await.unwrap();
+        assert_eq!(again, first);
+        assert_eq!(read(&first.worktree_path, "a.txt"), "agent edit\n");
+        // The diff is between commits, so the edit doesn't show up in it.
+        assert_eq!(manager.diff(again).await.unwrap(), files);
+
+        // A new push moves the worktree, dropping edits but not untracked files.
+        run(&work, &["checkout", "-q", &head]);
+        let pushed = commit(&work, &[("c.txt", "newer\n")]);
+        run(
+            &work,
+            &["push", "-q", "-f", &remote, "HEAD:refs/pull/1/head"],
+        );
+        let moved = prepare(1, None).await.unwrap();
+        assert_eq!(moved.head_oid, pushed);
+        assert_eq!(read(&moved.worktree_path, "a.txt"), "one\nTWO\n");
+        assert_eq!(read(&moved.worktree_path, "c.txt"), "newer\n");
+        assert_eq!(read(&moved.worktree_path, "cache.tmp"), "build cache\n");
+
+        // A worktree deleted by hand is recreated.
+        std::fs::remove_dir_all(&moved.worktree_path).unwrap();
+        let recreated = prepare(1, None).await.unwrap();
+        assert_eq!(read(&recreated.worktree_path, "c.txt"), "newer\n");
+
+        // Drafts pin the PR to `pushed`. A force-push moves `latest_head_oid` only,
+        // even once the remote has dropped `pushed`.
+        let pinned_files = manager.diff(moved.clone()).await.unwrap();
+        run(&work, &["checkout", "-q", &head]);
+        let forced = commit(&work, &[("a.txt", "forced\n")]);
+        run(
+            &work,
+            &["push", "-q", "-f", &remote, "HEAD:refs/pull/1/head"],
+        );
+        run(&remote, &["gc", "-q", "--prune=now"]);
+        let on_remote = std::process::Command::new(git_path())
+            .args(["-C", &remote, "cat-file", "-e", &pushed])
+            .status()
+            .unwrap();
+        assert!(
+            !on_remote.success(),
+            "the remote should have dropped {pushed}"
+        );
+        let pinned = prepare(1, Some(&pushed)).await.unwrap();
+        assert_eq!(
+            (&pinned.head_oid, &pinned.latest_head_oid),
+            (&pushed, &forced)
+        );
+        assert_eq!(pinned.merge_base_oid, base);
+        assert_eq!(read(&pinned.worktree_path, "c.txt"), "newer\n");
+        assert_eq!(manager.diff(pinned).await.unwrap(), pinned_files);
+        assert_eq!(run(&bare, &["rev-parse", "refs/ghv/pinned/1"]), pushed);
+
+        // Unpinning moves the worktree to the latest head and drops the pin ref.
+        let unpinned = prepare(1, None).await.unwrap();
+        assert_eq!(
+            (&unpinned.head_oid, &unpinned.latest_head_oid),
+            (&forced, &forced)
+        );
+        assert_eq!(read(&unpinned.worktree_path, "a.txt"), "forced\n");
+        assert_eq!(run(&bare, &["for-each-ref", "refs/ghv/pinned"]), "");
+
+        // A pinned commit that was never fetched here is fetched by id.
+        let orphan = commit(&work, &[("a.txt", "orphan\n")]);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/tmp/orphan"]);
+        run(&remote, &["update-ref", "-d", "refs/tmp/orphan"]);
+        let fetched = prepare(2, Some(&orphan)).await.unwrap();
+        assert_eq!(
+            (&fetched.head_oid, &fetched.latest_head_oid),
+            (&orphan, &head)
+        );
+        assert_eq!(read(&fetched.worktree_path, "a.txt"), "orphan\n");
+
+        // One the remote doesn't have either can't be shown.
+        let gone = "1234567890123456789012345678901234567890";
+        let message = prepare(2, Some(gone)).await.unwrap_err().to_string();
+        assert!(
+            message.contains("(1234567) is no longer available on GitHub"),
+            "{message}"
+        );
+        let message = prepare(2, Some("1234567")).await.unwrap_err().to_string();
+        assert!(message.contains("invalid pinned commit"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn reports_missing_prs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().to_str().unwrap();
+        let remote = format!("{tmp}/remote/octo/demo.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        run(&remote, &["init", "-q", "-b", "main"]);
+        commit(&remote, &[("a.txt", "a\n")]);
+
+        let manager = CheckoutManager::with_remote_base(
+            format!("{tmp}/data"),
+            format!("file://{tmp}/remote/"),
+        );
+        let message = manager
+            .prepare("octo/demo".into(), 9, "main".into(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("Couldn't fetch PR #9 and branch main of octo/demo"),
+            "{message}"
+        );
+        assert!(message.contains("refs/pull/9/head"), "{message}");
+    }
+
+    /// `cargo test -p ghv_core -- --ignored`
+    #[tokio::test]
+    #[ignore = "needs network and gh login"]
+    async fn prepares_a_live_pr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckoutManager::new(tmp.path().to_str().unwrap().into());
+        let checkout = manager
+            .prepare("octocat/Hello-World".into(), 1, "master".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            checkout.head_oid,
+            "7044a8a032e85b6ab611033b2ac8af7ce85805b2"
+        );
+        let files = manager.diff(checkout).await.unwrap();
+        assert!(!files.is_empty());
+        assert!(files.iter().all(|f| !f.hunks.is_empty() || f.is_binary));
+    }
+}
