@@ -15,6 +15,11 @@ final class AppModel {
     private(set) var isRefreshing = false
     private(set) var lastUpdated: Date?
 
+    /// The PR shown in the review window. The menu bar sets it too.
+    var selectedPullRequestURL: String?
+    /// Every PR seen since launch, so the review window can keep showing one that left the dashboard.
+    private var lastKnownPullRequests: [String: PullRequest] = [:]
+
     private let client = GitHubClient()
     private var pollTask: Task<Void, Never>?
 
@@ -43,7 +48,11 @@ final class AppModel {
         defer { isRefreshing = false }
 
         do {
-            dashboard = try await client.fetchDashboard()
+            let dashboard = try await client.fetchDashboard()
+            for pullRequest in dashboard.allPullRequests {
+                lastKnownPullRequests[pullRequest.url] = pullRequest
+            }
+            self.dashboard = dashboard
             errorMessage = nil
             lastUpdated = Date()
         } catch let error as CoreError {
@@ -51,6 +60,24 @@ final class AppModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// The selected PR as last seen, even if a refresh has since dropped it from the dashboard.
+    var selectedPullRequest: PullRequest? {
+        selectedPullRequestURL.flatMap { lastKnownPullRequests[$0] }
+    }
+
+    /// False when the selected PR is no longer in any of the dashboard's lists, e.g. merged or closed.
+    var isSelectionInDashboard: Bool {
+        dashboard?.allPullRequests.contains { $0.url == selectedPullRequestURL } ?? false
+    }
+}
+
+extension Dashboard {
+    /// Review requested, then reviewed by me, then authored. A PR can be in several lists, so each appears once.
+    var allPullRequests: [PullRequest] {
+        var seen = Set<String>()
+        return (reviewRequested + reviewedByMe + authored).filter { seen.insert($0.url).inserted }
     }
 }
 
