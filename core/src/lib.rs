@@ -3,9 +3,15 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
+
+mod agent;
+mod checkout;
+mod mcp;
+mod pr;
 
 uniffi::setup_scaffolding!();
 
@@ -67,6 +73,35 @@ pub enum CoreError {
     Network(String),
     #[error("GitHub API error: {0}")]
     Api(String),
+    #[error("Git error: {0}")]
+    Git(String),
+    #[error("Agent error: {0}")]
+    Agent(String),
+    #[error("Storage error: {0}")]
+    Storage(String),
+}
+
+/// Which side of a diff a line is on, named as GitHub's review API names them:
+/// `Left` is the base (removed lines), `Right` is the head (added and context lines).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum DiffSide {
+    Left,
+    Right,
+}
+
+/// Runtime for background work that outlives a single FFI call (agent
+/// processes, the MCP server) and for spawning from synchronous exports,
+/// which have no runtime context of their own.
+#[allow(dead_code)] // first used by agent.rs and mcp.rs
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build")
+    });
+    &RUNTIME
 }
 
 /// The overall review state GitHub computes from reviews and branch protection.

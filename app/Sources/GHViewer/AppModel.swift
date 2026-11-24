@@ -59,7 +59,8 @@ extension CoreError {
     /// `localizedDescription` includes the Swift case name, so don't show that.
     var message: String {
         switch self {
-        case .GhNotFound(let message), .Auth(let message), .Network(let message), .Api(let message):
+        case .GhNotFound(let message), .Auth(let message), .Network(let message), .Api(let message),
+             .Git(let message), .Agent(let message), .Storage(let message):
             message
         }
     }
