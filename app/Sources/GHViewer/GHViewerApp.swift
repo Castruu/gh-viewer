@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct GHViewerApp: App {
     @State private var model = AppModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra {
@@ -10,8 +11,22 @@ struct GHViewerApp: App {
         } label: {
             MenuBarLabel(reviewCount: model.dashboard?.reviewRequested.count,
                          hasError: model.errorMessage != nil)
+                // Development aid, for screenshots without clicking the menu bar:
+                // `open build/GHViewer.app --args --open-review-window [<PR URL to select>]`.
+                .onAppear {
+                    let arguments = CommandLine.arguments
+                    if let index = arguments.firstIndex(of: "--open-review-window") {
+                        model.selectedPullRequestURL = arguments.dropFirst(index + 1).first
+                        openWindow.reviewWindow()
+                    }
+                }
         }
         .menuBarExtraStyle(.window)
+
+        // Opened from the menu bar; ReviewWindow keeps it from opening by itself at launch.
+        Window("GH Viewer", id: ReviewWindow.id) {
+            ReviewWindow(model: model)
+        }
     }
 }
 
