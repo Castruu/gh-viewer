@@ -101,10 +101,12 @@ extension Dashboard {
 
 private struct RepoHeader: View {
     let group: RepoGroup
+    @Environment(\.palette) private var palette
 
     var body: some View {
         HStack(spacing: 6) {
             Text(group.repo)
+                .foregroundStyle(palette.repo(group.repo))
                 .lineLimit(1)
                 .truncationMode(.middle)
             if !group.waitingURLs.isEmpty {

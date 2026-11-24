@@ -18,6 +18,7 @@ func relativeTime(_ date: Date, now: Date) -> String {
 
 struct ReviewIcon: View {
     let decision: ReviewDecision?
+    @Environment(\.palette) private var palette
 
     var body: some View {
         Image(systemName: symbol)
@@ -37,9 +38,9 @@ struct ReviewIcon: View {
 
     private var color: Color {
         switch decision {
-        case .approved: .green
-        case .changesRequested: .red
-        case .reviewRequired: .orange
+        case .approved: palette.pass
+        case .changesRequested: palette.fail
+        case .reviewRequired: palette.pending
         case nil: .secondary
         }
     }
@@ -56,6 +57,7 @@ struct ReviewIcon: View {
 
 struct CheckIcon: View {
     let state: CheckState?
+    @Environment(\.palette) private var palette
 
     var body: some View {
         Circle()
@@ -67,9 +69,9 @@ struct CheckIcon: View {
 
     private var color: Color {
         switch state {
-        case .success: .green
-        case .failure: .red
-        case .pending: .yellow
+        case .success: palette.pass
+        case .failure: palette.fail
+        case .pending: palette.pending
         case nil: .clear
         }
     }
@@ -96,6 +98,7 @@ struct DraftBadge: View {
 }
 
 struct ErrorView: View {
+    @Environment(\.palette) private var palette
     let message: String
     let isRetrying: Bool
     let retry: () -> Void
@@ -104,7 +107,7 @@ struct ErrorView: View {
         VStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.title)
-                .foregroundStyle(.orange)
+                .foregroundStyle(palette.pending)
             Text(message)
                 .multilineTextAlignment(.center)
                 .textSelection(.enabled)
@@ -121,12 +124,13 @@ struct ErrorView: View {
 
 /// Shown when GitHub returned results with errors, e.g. an org requiring SAML SSO.
 struct WarningBanner: View {
+    @Environment(\.palette) private var palette
     let warnings: [String]
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(palette.pending)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Some pull requests may be missing")
                     .font(.callout.weight(.medium))
@@ -166,13 +170,14 @@ struct RefreshButton: View {
 
 /// "Updated 2 min. ago", or a warning when the last refresh failed.
 struct RefreshStatus: View {
+    @Environment(\.palette) private var palette
     let model: AppModel
 
     var body: some View {
         // Only show the error here when stale data is still on screen; otherwise ErrorView shows it.
         if let errorMessage = model.errorMessage, model.dashboard != nil {
             Label("Refresh failed", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(palette.pending)
                 .help(errorMessage)
         } else if let lastUpdated = model.lastUpdated {
             TimelineView(.periodic(from: .now, by: 30)) { context in

@@ -27,6 +27,9 @@ struct ReviewWindow: View {
         }
         .toolbar {
             ToolbarItem {
+                ThemeMenu()
+            }
+            ToolbarItem {
                 RefreshButton(model: model)
             }
             ToolbarItem {
@@ -44,6 +47,7 @@ struct ReviewWindow: View {
             }
         }
         .frame(minWidth: 760, minHeight: 440)
+        .themed()
         // The app is menu bar only, except while this window is open: then it gets a Dock icon and ⌘-Tab.
         .onAppear {
             // `.defaultLaunchBehavior(.suppressed)` needs macOS 15, and a SceneBuilder has no

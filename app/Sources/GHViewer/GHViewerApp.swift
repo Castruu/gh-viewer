@@ -10,6 +10,7 @@ struct GHViewerApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuView(model: model)
+                .themed()
         } label: {
             MenuBarLabel(reviewCount: model.dashboard?.reviewRequested.count,
                          hasError: model.errorMessage != nil)
@@ -42,6 +43,12 @@ struct GHViewerApp: App {
 /// which has no scene API for it.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let reopen = Notification.Name("GHViewerReopen")
+
+    /// Applies a saved Light or Dark choice before any window shows, so nothing flashes in the wrong one.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let saved = UserDefaults.standard.string(forKey: ThemeKey.appearance) ?? ""
+        NSApp.appearance = Appearance(rawValue: saved)?.nsAppearance
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         NotificationCenter.default.post(name: Self.reopen, object: nil)
