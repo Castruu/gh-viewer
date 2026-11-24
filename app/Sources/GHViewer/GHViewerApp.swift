@@ -27,6 +27,8 @@ struct GHViewerApp: App {
         Window("GH Viewer", id: ReviewWindow.id) {
             ReviewWindow(model: model)
         }
+        // Room for the sidebar, the diff and the agent chat side by side.
+        .defaultSize(width: 1280, height: 800)
     }
 }
 
