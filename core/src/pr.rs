@@ -34,7 +34,7 @@ query($owner: String!, $name: String!, $number: Int!,
         pageInfo { hasNextPage endCursor }
         nodes {
           id path line startLine diffSide startDiffSide isResolved isOutdated
-          comments(first: 100) { nodes { author { login } body createdAt url } }
+          comments(first: 100) { nodes { author { login } body createdAt url state } }
         }
       }
     }
@@ -539,7 +539,7 @@ fn parse_pr_page(body: &str, repo: &str, number: u64) -> Result<PrPage, CoreErro
             files,
             threads: threads
                 .into_iter()
-                .map(convert_thread)
+                .filter_map(|thread| convert_thread(thread).transpose())
                 .collect::<Result<_, _>>()?,
             pending_review: viewer_pending_review(node.reviews),
         },
@@ -603,10 +603,16 @@ fn viewer_pending_review(reviews: Option<Connection<ReviewNode>>) -> Option<Pend
     })
 }
 
-fn convert_thread(node: ThreadNode) -> Result<ReviewThread, CoreError> {
-    let comments = node
-        .comments
-        .nodes
+/// Leaves out the viewer's pending comments, which `pending_review` already
+/// shows, and returns `None` for a thread made only of them.
+fn convert_thread(node: ThreadNode) -> Result<Option<ReviewThread>, CoreError> {
+    let mut nodes = node.comments.nodes;
+    let had_comments = !nodes.is_empty();
+    nodes.retain(|comment| comment.state != "PENDING");
+    if had_comments && nodes.is_empty() {
+        return Ok(None);
+    }
+    let comments = nodes
         .into_iter()
         .map(|comment| {
             let created_at = humantime::parse_rfc3339(&comment.created_at).map_err(|e| {
@@ -620,7 +626,7 @@ fn convert_thread(node: ThreadNode) -> Result<ReviewThread, CoreError> {
             })
         })
         .collect::<Result<_, CoreError>>()?;
-    Ok(ReviewThread {
+    Ok(Some(ReviewThread {
         id: node.id,
         path: node.path,
         line: node.line,
@@ -630,7 +636,7 @@ fn convert_thread(node: ThreadNode) -> Result<ReviewThread, CoreError> {
         is_resolved: node.is_resolved,
         is_outdated: node.is_outdated,
         comments,
-    })
+    }))
 }
 
 #[derive(Deserialize)]
@@ -725,6 +731,8 @@ struct CommentNode {
     body: String,
     created_at: String,
     url: String,
+    /// PENDING or SUBMITTED. Kept as a string so a new state doesn't break parsing.
+    state: String,
 }
 
 // --- Drafts ---------------------------------------------------------------------
@@ -999,7 +1007,7 @@ mod tests {
               "id": "PRRT_outdated", "path": "src/lib.rs", "line": null, "startLine": null,
               "diffSide": "RIGHT", "startDiffSide": null, "isResolved": true, "isOutdated": true,
               "comments": { "nodes": [
-                { "author": { "login": "octocat" }, "body": "Typo here.",
+                { "author": { "login": "octocat" }, "body": "Typo here.", "state": "SUBMITTED",
                   "createdAt": "2026-11-04T20:57:47Z", "url": "https://github.com/o/r/pull/42#discussion_r1" }
               ] }
             },
@@ -1007,10 +1015,20 @@ mod tests {
               "id": "PRRT_multi", "path": "src/pr.rs", "line": 12, "startLine": 8,
               "diffSide": "RIGHT", "startDiffSide": "LEFT", "isResolved": false, "isOutdated": false,
               "comments": { "nodes": [
-                { "author": null, "body": "Can this be one function?",
+                { "author": null, "body": "Can this be one function?", "state": "SUBMITTED",
                   "createdAt": "2026-11-05T09:00:00Z", "url": "https://github.com/o/r/pull/42#discussion_r2" },
-                { "author": { "login": "hubot" }, "body": "Done.",
-                  "createdAt": "2026-11-05T10:30:00Z", "url": "https://github.com/o/r/pull/42#discussion_r3" }
+                { "author": { "login": "hubot" }, "body": "Done.", "state": "SUBMITTED",
+                  "createdAt": "2026-11-05T10:30:00Z", "url": "https://github.com/o/r/pull/42#discussion_r3" },
+                { "author": { "login": "me" }, "body": "Split this up?", "state": "PENDING",
+                  "createdAt": "2026-11-06T08:00:00Z", "url": "https://github.com/o/r/pull/42#discussion_r4" }
+              ] }
+            },
+            {
+              "id": "PRRT_pending", "path": "src/lib.rs", "line": 4, "startLine": 4,
+              "diffSide": "LEFT", "startDiffSide": "LEFT", "isResolved": false, "isOutdated": false,
+              "comments": { "nodes": [
+                { "author": { "login": "me" }, "body": "Why remove this?", "state": "PENDING",
+                  "createdAt": "2026-11-06T08:01:00Z", "url": "https://github.com/o/r/pull/42#discussion_r5" }
               ] }
             }
           ]
@@ -1138,7 +1156,9 @@ mod tests {
             .unwrap()
             .detail
             .threads;
-        assert_eq!(threads.len(), 2);
+        // PRRT_pending has only the viewer's pending comment, which `pending_review` shows.
+        let ids: Vec<_> = threads.iter().map(|thread| thread.id.as_str()).collect();
+        assert_eq!(ids, ["PRRT_outdated", "PRRT_multi"]);
 
         let outdated = &threads[0];
         assert_eq!(
@@ -1159,6 +1179,7 @@ mod tests {
             (Some(DiffSide::Left), DiffSide::Right)
         );
         assert!(!multi.is_outdated && !multi.is_resolved);
+        // The viewer's pending reply is left out.
         let authors: Vec<_> = multi.comments.iter().map(|c| c.author.as_deref()).collect();
         assert_eq!(authors, [None, Some("hubot")]);
         assert_eq!(
