@@ -16,7 +16,7 @@ use crate::{Author, CoreError, DiffSide, GitHubClient, GraphQlError};
 
 /// The PR and the first page of every connection. Later pages reuse it with
 /// `@include` turned off for connections that are done, so each round trip
-/// only fetches what's left.
+/// only fetches what's left. Sent with `PENDING_REVIEWS` appended.
 const PR_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!,
       $withFiles: Boolean!, $filesAfter: String, $withThreads: Boolean!, $threadsAfter: String) {
@@ -24,6 +24,7 @@ query($owner: String!, $name: String!, $number: Int!,
     pullRequest(number: $number) {
       id title body url isDraft baseRefName headRefName headRefOid
       author { login }
+      ...pendingReviews
       # GitHub caps this connection at 3000 files.
       files(first: 100, after: $filesAfter) @include(if: $withFiles) {
         pageInfo { hasNextPage endCursor }
@@ -38,6 +39,38 @@ query($owner: String!, $name: String!, $number: Int!,
       }
     }
   }
+}
+"#;
+
+/// GitHub only shows a pending review to its author, and allows one per user;
+/// `viewerDidAuthor` is checked anyway. Review comments carry no side, so
+/// `diffHunk` is fetched to infer it.
+const PENDING_REVIEWS: &str = r#"
+fragment pendingReviews on PullRequest {
+  reviews(states: PENDING, first: 10) {
+    nodes {
+      id viewerDidAuthor commit { oid }
+      comments(first: 100) { nodes { path line startLine body diffHunk } }
+    }
+  }
+}
+"#;
+
+/// The viewer's pending review, looked up right before submitting. Sent with
+/// `PENDING_REVIEWS` appended.
+const PENDING_LOOKUP: &str = r#"
+query($id: ID!) { node(id: $id) { ... on PullRequest { ...pendingReviews } } }
+"#;
+
+const ADD_THREAD: &str = r#"
+mutation($input: AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input: $input) { thread { id } }
+}
+"#;
+
+const SUBMIT_PENDING: &str = r#"
+mutation($input: SubmitPullRequestReviewInput!) {
+  submitPullRequestReview(input: $input) { pullRequestReview { url } }
 }
 "#;
 
@@ -75,6 +108,29 @@ pub struct PullRequestDetail {
     pub head_oid: String,
     pub files: Vec<ChangedFile>,
     pub threads: Vec<ReviewThread>,
+    /// A review you started on github.com and haven't submitted. `submit_review`
+    /// adds your drafts to it and submits it.
+    pub pending_review: Option<PendingReview>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PendingReview {
+    pub id: String,
+    /// The commit the review was started on. Empty if GitHub no longer has it.
+    pub commit_oid: String,
+    pub comments: Vec<PendingComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PendingComment {
+    pub path: String,
+    /// `None` for a comment on the whole file.
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    /// Inferred from the diff hunk, as GitHub doesn't report it for review
+    /// comments: `Left` only when the commented line was removed.
+    pub side: DiffSide,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record, Deserialize)]
@@ -100,7 +156,7 @@ pub struct ReviewThread {
     pub path: String,
     /// `None` when the thread is outdated and its line is no longer in the diff.
     pub line: Option<u32>,
-    /// First line of a multi-line thread.
+    /// First line of the thread's range. GitHub sets it to `line` for a single-line thread.
     pub start_line: Option<u32>,
     pub side: DiffSide,
     pub start_side: Option<DiffSide>,
@@ -138,6 +194,8 @@ pub struct DraftComment {
     pub start_side: Option<DiffSide>,
     pub body: String,
     pub author: DraftAuthor,
+    /// The commit whose diff the lines refer to. All of a PR's drafts share one.
+    pub commit_oid: String,
 }
 
 /// Input to `DraftStore::add`: a draft before it has an id.
@@ -150,6 +208,7 @@ pub struct NewDraft {
     pub start_side: Option<DiffSide>,
     pub body: String,
     pub author: DraftAuthor,
+    pub commit_oid: String,
 }
 
 /// Who wrote a draft: you, or an agent through the MCP server.
@@ -170,13 +229,14 @@ impl GitHubClient {
         let (owner, name) = split_repo(&repo).ok_or_else(|| {
             CoreError::Api(format!("invalid repo {repo:?}, expected \"owner/name\""))
         })?;
+        let query = format!("{PR_QUERY}{PENDING_REVIEWS}");
         let mut variables = json!({
             "owner": owner, "name": name, "number": number,
             "withFiles": true, "withThreads": true,
         });
 
         let first = parse_pr_page(
-            &self.graphql(PR_QUERY, variables.clone()).await?,
+            &self.graphql(&query, variables.clone()).await?,
             &repo,
             number,
         )?;
@@ -188,7 +248,7 @@ impl GitHubClient {
             variables["withThreads"] = threads_after.is_some().into();
             variables["threadsAfter"] = threads_after.into();
             let page = parse_pr_page(
-                &self.graphql(PR_QUERY, variables.clone()).await?,
+                &self.graphql(&query, variables.clone()).await?,
                 &repo,
                 number,
             )?;
@@ -211,7 +271,9 @@ impl GitHubClient {
         parse_mutation(&self.graphql(mutation, variables).await?).map(drop)
     }
 
-    /// Creates and submits a review in one mutation; returns the review's URL.
+    /// Submits a review with the drafts as comments; returns the review's URL.
+    /// If you have a pending review on github.com, the drafts are added to it
+    /// and it's submitted, so its comments go out too.
     pub async fn submit_review(
         &self,
         pull_request_id: String,
@@ -220,13 +282,95 @@ impl GitHubClient {
         body: String,
         comments: Vec<DraftComment>,
     ) -> Result<String, CoreError> {
-        let variables = review_variables(&pull_request_id, &commit_oid, event, &body, &comments);
-        let data = parse_mutation(&self.graphql(SUBMIT_REVIEW, variables).await?)?;
-        data.pointer("/addPullRequestReview/pullRequestReview/url")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| CoreError::Api("GitHub's response had no review URL".into()))
+        // Looked up fresh: it may have been started, submitted or half-filled by a failed try since the fetch.
+        let lookup = format!("{PENDING_LOOKUP}{PENDING_REVIEWS}");
+        let pending = parse_pending_lookup(
+            &self
+                .graphql(&lookup, json!({ "id": pull_request_id }))
+                .await?,
+        )?;
+        let Some(pending) = pending else {
+            let variables =
+                review_variables(&pull_request_id, &commit_oid, event, &body, &comments);
+            let data = parse_mutation(&self.graphql(SUBMIT_REVIEW, variables).await?)?;
+            return review_url(&data, "/addPullRequestReview/pullRequestReview/url");
+        };
+
+        let new = new_drafts(&comments, &pending.comments);
+        if !new.is_empty() && pending.commit_oid != commit_oid {
+            return Err(CoreError::Api(format!(
+                "your pending review on github.com is on commit {}, but these drafts are on {}. \
+                 Submit or cancel it on github.com, then try again.",
+                short_oid(&pending.commit_oid),
+                short_oid(&commit_oid)
+            )));
+        }
+        // Retrying after a failure is safe: drafts already in the pending review are skipped above.
+        let partial = |added: usize, error: CoreError| {
+            CoreError::Api(format!(
+                "added {added} of {} comments to your pending review on GitHub, then failed: {error}. \
+                 Retrying is safe: comments already added are skipped.",
+                new.len()
+            ))
+        };
+        for (added, draft) in new.iter().enumerate() {
+            let result = self
+                .graphql(ADD_THREAD, add_thread_variables(&pending.id, draft))
+                .await
+                .and_then(|response| parse_mutation(&response))
+                .and_then(|data| {
+                    // GitHub can return no thread without an error, e.g. for a line outside the diff.
+                    match data.pointer("/addPullRequestReviewThread/thread") {
+                        Some(Value::Object(_)) => Ok(()),
+                        _ => Err(CoreError::Api(format!(
+                            "GitHub didn't accept the comment on {} line {}",
+                            draft.path, draft.line
+                        ))),
+                    }
+                });
+            result.map_err(|error| partial(added, error))?;
+        }
+        self.graphql(
+            SUBMIT_PENDING,
+            submit_pending_variables(&pending.id, event, &body),
+        )
+        .await
+        .and_then(|response| parse_mutation(&response))
+        .and_then(|data| review_url(&data, "/submitPullRequestReview/pullRequestReview/url"))
+        .map_err(|error| match new.len() {
+            0 => error,
+            added => partial(added, error),
+        })
     }
+}
+
+fn review_url(data: &Value, pointer: &str) -> Result<String, CoreError> {
+    data.pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| CoreError::Api("GitHub's response had no review URL".into()))
+}
+
+fn event_name(event: ReviewEvent) -> &'static str {
+    match event {
+        ReviewEvent::Approve => "APPROVE",
+        ReviewEvent::RequestChanges => "REQUEST_CHANGES",
+        ReviewEvent::Comment => "COMMENT",
+    }
+}
+
+/// A draft's location and body, as both thread inputs take them.
+fn thread_input(draft: &DraftComment) -> Value {
+    let mut thread = json!({
+        "path": draft.path, "line": draft.line, "side": draft.side, "body": draft.body,
+    });
+    if let Some(start_line) = draft.start_line {
+        thread["startLine"] = start_line.into();
+    }
+    if let Some(start_side) = draft.start_side {
+        thread["startSide"] = json!(start_side);
+    }
+    thread
 }
 
 /// Variables for `SUBMIT_REVIEW`: every draft becomes a `DraftPullRequestReviewThread`.
@@ -237,30 +381,48 @@ fn review_variables(
     body: &str,
     comments: &[DraftComment],
 ) -> Value {
-    let event = match event {
-        ReviewEvent::Approve => "APPROVE",
-        ReviewEvent::RequestChanges => "REQUEST_CHANGES",
-        ReviewEvent::Comment => "COMMENT",
-    };
-    let threads: Vec<Value> = comments
-        .iter()
-        .map(|comment| {
-            let mut thread = json!({
-                "path": comment.path, "line": comment.line, "side": comment.side, "body": comment.body,
-            });
-            if let Some(start_line) = comment.start_line {
-                thread["startLine"] = start_line.into();
-            }
-            if let Some(start_side) = comment.start_side {
-                thread["startSide"] = json!(start_side);
-            }
-            thread
-        })
-        .collect();
+    let threads: Vec<Value> = comments.iter().map(thread_input).collect();
     json!({ "input": {
         "pullRequestId": pull_request_id, "commitOID": commit_oid,
-        "event": event, "body": body, "threads": threads,
+        "event": event_name(event), "body": body, "threads": threads,
     } })
+}
+
+fn add_thread_variables(pending_review_id: &str, draft: &DraftComment) -> Value {
+    let mut input = thread_input(draft);
+    input["pullRequestReviewId"] = pending_review_id.into();
+    json!({ "input": input })
+}
+
+fn submit_pending_variables(pending_review_id: &str, event: ReviewEvent, body: &str) -> Value {
+    json!({ "input": {
+        "pullRequestReviewId": pending_review_id, "event": event_name(event), "body": body,
+    } })
+}
+
+/// Drafts not already in the pending review, so a retry doesn't post them twice.
+/// Side isn't compared: GitHub doesn't report it for review comments, and the
+/// inferred one can be wrong for comments on unchanged lines.
+fn new_drafts<'a>(drafts: &'a [DraftComment], pending: &[PendingComment]) -> Vec<&'a DraftComment> {
+    // A single-line range is sent without a start line, whichever way it was stored.
+    let start = |start: Option<u32>, line: Option<u32>| start.filter(|&s| Some(s) != line);
+    drafts
+        .iter()
+        .filter(|draft| {
+            !pending.iter().any(|comment| {
+                comment.path == draft.path
+                    && comment.line == Some(draft.line)
+                    && start(comment.start_line, comment.line)
+                        == start(draft.start_line, Some(draft.line))
+                    && comment.body.trim() == draft.body.trim()
+            })
+        })
+        .collect()
+}
+
+/// The first 7 characters, as GitHub shows commits.
+fn short_oid(oid: &str) -> &str {
+    oid.get(..7).unwrap_or(oid)
 }
 
 /// Splits "owner/name". Only characters GitHub allows in names pass, so the
@@ -313,14 +475,14 @@ fn parse_mutation(body: &str) -> Result<Value, CoreError> {
     if messages.is_empty() && !data.is_null() {
         return Ok(data);
     }
-    // addPullRequestReview can't create a second review while one is pending,
-    // e.g. one started on github.com and never submitted.
+    // addPullRequestReview can't create a second review while one is pending.
+    // submit_review checks first, so this means one was started on github.com meanwhile.
     if messages
         .iter()
         .any(|m| m.to_lowercase().contains("one pending review"))
     {
         return Err(CoreError::Api(format!(
-            "you already have a pending review on this PR. Submit or cancel it on github.com, then try again ({})",
+            "you just started a pending review on this PR on github.com. Try again to add your drafts to it ({})",
             messages.join("; ")
         )));
     }
@@ -379,9 +541,65 @@ fn parse_pr_page(body: &str, repo: &str, number: u64) -> Result<PrPage, CoreErro
                 .into_iter()
                 .map(convert_thread)
                 .collect::<Result<_, _>>()?,
+            pending_review: viewer_pending_review(node.reviews),
         },
         files_after,
         threads_after,
+    })
+}
+
+/// Parses `PENDING_LOOKUP`. Any error fails, since a mutation follows.
+fn parse_pending_lookup(body: &str) -> Result<Option<PendingReview>, CoreError> {
+    #[derive(Deserialize)]
+    struct PullRequestNode {
+        reviews: Option<Connection<ReviewNode>>,
+    }
+    let (mut data, messages) = split_response(body)?;
+    if !messages.is_empty() {
+        return Err(api_error(messages));
+    }
+    let node = data
+        .pointer_mut("/node")
+        .map(Value::take)
+        .unwrap_or_default();
+    if node.is_null() {
+        return Err(CoreError::Api(
+            "the pull request wasn't found, or your gh account can't see it".into(),
+        ));
+    }
+    let node: PullRequestNode = serde_json::from_value(node).map_err(unexpected)?;
+    Ok(viewer_pending_review(node.reviews))
+}
+
+fn viewer_pending_review(reviews: Option<Connection<ReviewNode>>) -> Option<PendingReview> {
+    let review = reviews?
+        .nodes
+        .into_iter()
+        .find(|review| review.viewer_did_author)?;
+    // shortcut: only the first 100 comments of a pending review are read, so past that the count is low and a retry could repeat a draft; paginate if reviews that big show up.
+    let comments = review.comments.nodes.into_iter().map(|comment| {
+        // The hunk ends at the commented line, and only a removed line is on the left.
+        let removed = comment
+            .diff_hunk
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with('-'));
+        PendingComment {
+            path: comment.path,
+            line: comment.line,
+            start_line: comment.start_line,
+            side: if removed {
+                DiffSide::Left
+            } else {
+                DiffSide::Right
+            },
+            body: comment.body,
+        }
+    });
+    Some(PendingReview {
+        id: review.id,
+        commit_oid: review.commit.map(|commit| commit.oid).unwrap_or_default(),
+        comments: comments.collect(),
     })
 }
 
@@ -432,12 +650,37 @@ struct PrNode {
     files: Option<Connection<ChangedFile>>,
     #[serde(default)]
     review_threads: Option<Connection<ThreadNode>>,
+    reviews: Option<Connection<ReviewNode>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewNode {
+    id: String,
+    viewer_did_author: bool,
+    commit: Option<CommitOid>,
+    comments: Connection<PendingCommentNode>,
+}
+
+#[derive(Deserialize)]
+struct CommitOid {
+    oid: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingCommentNode {
+    path: String,
+    line: Option<u32>,
+    start_line: Option<u32>,
+    body: String,
+    diff_hunk: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Connection<T> {
-    // Thread comments are fetched without pageInfo.
+    // Comment lists are fetched without pageInfo.
     #[serde(default)]
     page_info: PageInfo,
     nodes: Vec<T>,
@@ -524,6 +767,17 @@ impl DraftStore {
         Ok(cached(&mut lock(&self.cache), &path)?.clone())
     }
 
+    /// The commit the PR's drafts were written against, `None` without drafts.
+    /// The app keeps the diff on it and submits with it.
+    pub fn pinned_commit(&self, repo: String, number: u64) -> Result<Option<String>, CoreError> {
+        let path = self.path(&repo, number)?;
+        let cache = &mut lock(&self.cache);
+        Ok(cached(cache, &path)?
+            .first()
+            .map(|draft| draft.commit_oid.clone()))
+    }
+
+    /// Rejects a draft on a different commit than the PR's other drafts.
     pub fn add(
         &self,
         repo: String,
@@ -539,8 +793,20 @@ impl DraftStore {
             start_side: draft.start_side,
             body: draft.body,
             author: draft.author,
+            commit_oid: draft.commit_oid,
         };
         self.change(&repo, number, |drafts| {
+            // Lines only mean something on one diff, and a review is submitted on one commit.
+            if let Some(pinned) = drafts.first().map(|first| &first.commit_oid)
+                && *pinned != draft.commit_oid
+            {
+                return Err(CoreError::Storage(format!(
+                    "{repo}#{number}'s drafts are pinned to commit {}, but this comment is on {}. \
+                     Submit or discard them to comment on another commit.",
+                    short_oid(pinned),
+                    short_oid(&draft.commit_oid)
+                )));
+            }
             drafts.push(draft.clone());
             Ok(())
         })?;
@@ -693,7 +959,9 @@ mod tests {
     use std::time::Duration;
 
     /// Shaped like a real first page: three files (more pending), an outdated
-    /// thread, a multi-line thread and a comment from a deleted account.
+    /// thread, a multi-line thread, a comment from a deleted account, and the
+    /// viewer's pending review (behind one that isn't theirs, which GitHub
+    /// shouldn't return but is filtered anyway).
     const PR_RESPONSE: &str = r#"{
       "data": { "repository": { "pullRequest": {
         "id": "PR_kwDOAbc123", "title": "Add review window", "body": "Closes #4.",
@@ -701,6 +969,21 @@ mod tests {
         "baseRefName": "main", "headRefName": "feat/review",
         "headRefOid": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
         "author": null,
+        "reviews": { "nodes": [
+          { "id": "PRR_other", "viewerDidAuthor": false, "commit": { "oid": "aaaaaaa" },
+            "comments": { "nodes": [
+              { "path": "x", "line": 1, "startLine": null, "body": "not mine", "diffHunk": "@@ -1 +1 @@\n+x" }
+            ] } },
+          { "id": "PRR_mine", "viewerDidAuthor": true,
+            "commit": { "oid": "6dcb09b5b57875f334f61aebed695e2e4193db5e" },
+            "comments": { "nodes": [
+              { "path": "src/pr.rs", "line": 12, "startLine": 8, "body": "Split this up?",
+                "diffHunk": "@@ -1,3 +1,12 @@\n fn a() {}\n+fn b() {}" },
+              { "path": "src/lib.rs", "line": 4, "startLine": null, "body": "Why remove this?",
+                "diffHunk": "@@ -1,5 +1,4 @@\n use std::io;\n-use std::fs;" },
+              { "path": "README.md", "line": null, "startLine": null, "body": "Whole file.", "diffHunk": "" }
+            ] } }
+        ] },
         "files": {
           "pageInfo": { "hasNextPage": true, "endCursor": "Y3Vyc29yOjM=" },
           "nodes": [
@@ -769,6 +1052,86 @@ mod tests {
         assert_eq!(page.threads_after, None);
     }
 
+    fn pending(
+        path: &str,
+        line: Option<u32>,
+        start_line: Option<u32>,
+        side: DiffSide,
+        body: &str,
+    ) -> PendingComment {
+        PendingComment {
+            path: path.into(),
+            line,
+            start_line,
+            side,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn parses_the_viewers_pending_review() {
+        let review = parse_pr_page(PR_RESPONSE, "o/r", 42)
+            .unwrap()
+            .detail
+            .pending_review
+            .unwrap();
+        assert_eq!(review.id, "PRR_mine");
+        assert_eq!(
+            review.commit_oid,
+            "6dcb09b5b57875f334f61aebed695e2e4193db5e"
+        );
+        assert_eq!(
+            review.comments,
+            [
+                pending(
+                    "src/pr.rs",
+                    Some(12),
+                    Some(8),
+                    DiffSide::Right,
+                    "Split this up?"
+                ),
+                pending(
+                    "src/lib.rs",
+                    Some(4),
+                    None,
+                    DiffSide::Left,
+                    "Why remove this?"
+                ),
+                pending("README.md", None, None, DiffSide::Right, "Whole file."),
+            ]
+        );
+    }
+
+    #[test]
+    fn looks_up_the_pending_review_by_node_id() {
+        let found = r#"{ "data": { "node": { "reviews": { "nodes": [
+          { "id": "PRR_1", "viewerDidAuthor": true, "commit": null, "comments": { "nodes": [] } }
+        ] } } } }"#;
+        let review = parse_pending_lookup(found).unwrap().unwrap();
+        assert_eq!(
+            (review.id.as_str(), review.commit_oid.as_str()),
+            ("PRR_1", "")
+        );
+
+        let none = r#"{ "data": { "node": { "reviews": { "nodes": [] } } } }"#;
+        assert_eq!(parse_pending_lookup(none).unwrap(), None);
+
+        let missing = r#"{ "data": { "node": null } }"#;
+        assert!(
+            parse_pending_lookup(missing)
+                .unwrap_err()
+                .to_string()
+                .contains("wasn't found")
+        );
+
+        // About to mutate, so partial data isn't good enough.
+        let partial = r#"{ "data": { "node": { "reviews": null } }, "errors": [ { "message": "timeout" } ] }"#;
+        assert_eq!(
+            parse_pending_lookup(partial).unwrap_err().to_string(),
+            "GitHub API error: timeout"
+        );
+    }
+
     #[test]
     fn parses_review_threads() {
         let threads = parse_pr_page(PR_RESPONSE, "o/r", 42)
@@ -813,6 +1176,7 @@ mod tests {
         } } } }"#;
         let page = parse_pr_page(body, "o/r", 1).unwrap();
         assert!(page.detail.files.is_empty());
+        assert_eq!(page.detail.pending_review, None);
         assert_eq!((page.files_after, page.threads_after), (None, None));
     }
 
@@ -874,6 +1238,7 @@ mod tests {
             author: DraftAuthor::Agent {
                 name: "claude".into(),
             },
+            commit_oid: "abc".into(),
         }
     }
 
@@ -912,6 +1277,84 @@ mod tests {
     }
 
     #[test]
+    fn builds_pending_review_variables() {
+        assert_eq!(
+            add_thread_variables("PRR_1", &draft("2", Some((8, DiffSide::Left)))),
+            json!({ "input": {
+                "pullRequestReviewId": "PRR_1", "path": "src/pr.rs", "line": 12, "side": "RIGHT",
+                "startLine": 8, "startSide": "LEFT", "body": "comment 2",
+            } })
+        );
+        assert_eq!(
+            add_thread_variables("PRR_1", &draft("1", None)),
+            json!({ "input": {
+                "pullRequestReviewId": "PRR_1", "path": "src/pr.rs", "line": 12, "side": "RIGHT",
+                "body": "comment 1",
+            } })
+        );
+        assert_eq!(
+            submit_pending_variables("PRR_1", ReviewEvent::Approve, "LGTM"),
+            json!({ "input": { "pullRequestReviewId": "PRR_1", "event": "APPROVE", "body": "LGTM" } })
+        );
+    }
+
+    #[test]
+    fn skips_drafts_already_in_the_pending_review() {
+        let mut single_with_start = draft("single", None);
+        single_with_start.start_line = Some(12);
+        let mut other_line = draft("moved", None);
+        other_line.line = 13;
+        let drafts = [
+            draft("1", None),
+            draft("2", Some((8, DiffSide::Left))),
+            draft("edited", None),
+            single_with_start,
+            other_line,
+        ];
+        let pending = [
+            // A retry after "1" and "2" went in. Bodies compare trimmed; sides aren't compared.
+            pending("src/pr.rs", Some(12), None, DiffSide::Right, "comment 1\n"),
+            pending("src/pr.rs", Some(12), Some(8), DiffSide::Right, "comment 2"),
+            pending(
+                "src/pr.rs",
+                Some(12),
+                None,
+                DiffSide::Right,
+                "comment single",
+            ),
+            pending(
+                "src/pr.rs",
+                Some(12),
+                None,
+                DiffSide::Right,
+                "comment moved",
+            ),
+            pending(
+                "src/pr.rs",
+                Some(12),
+                None,
+                DiffSide::Right,
+                "something else",
+            ),
+        ];
+        let ids: Vec<_> = new_drafts(&drafts, &pending)
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, ["edited", "moved"]);
+        assert_eq!(new_drafts(&drafts, &[]).len(), 5);
+    }
+
+    #[test]
+    fn shortens_commits_like_github() {
+        assert_eq!(
+            short_oid("6dcb09b5b57875f334f61aebed695e2e4193db5e"),
+            "6dcb09b"
+        );
+        assert_eq!(short_oid("abc"), "abc");
+    }
+
+    #[test]
     fn mutation_returns_data_on_success() {
         let body = r#"{ "data": { "addPullRequestReview": { "pullRequestReview": { "url": "https://github.com/o/r/pull/1#pullrequestreview-9" } } } }"#;
         let data = parse_mutation(body).unwrap();
@@ -938,7 +1381,7 @@ mod tests {
           "errors": [ { "message": "User can only have one pending review per pull request" } ] }"#;
         let message = parse_mutation(body).unwrap_err().to_string();
         assert!(
-            message.contains("you already have a pending review"),
+            message.contains("you just started a pending review"),
             "{message}"
         );
         assert!(
@@ -958,6 +1401,7 @@ mod tests {
             start_side: None,
             body: body.into(),
             author: DraftAuthor::You,
+            commit_oid: "c0ffee0123456789".into(),
         }
     }
 
@@ -1024,6 +1468,38 @@ mod tests {
                 .count(),
             1,
             "no temp file left"
+        );
+    }
+
+    #[test]
+    fn pins_drafts_to_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        assert_eq!(store.pinned_commit("o/r".into(), 7).unwrap(), None);
+
+        store.add("o/r".into(), 7, new_draft("first")).unwrap();
+        assert_eq!(
+            store.pinned_commit("o/r".into(), 7).unwrap().as_deref(),
+            Some("c0ffee0123456789")
+        );
+
+        let mut newer = new_draft("on a newer push");
+        newer.commit_oid = "deadbeef0000".into();
+        let error = store.add("o/r".into(), 7, newer.clone()).unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)));
+        assert!(
+            error.to_string().contains("pinned to commit c0ffee0"),
+            "{error}"
+        );
+        assert_eq!(store.list("o/r".into(), 7).unwrap().len(), 1);
+
+        // Once the drafts are gone, any commit goes.
+        store.clear("o/r".into(), 7).unwrap();
+        assert_eq!(store.pinned_commit("o/r".into(), 7).unwrap(), None);
+        store.add("o/r".into(), 7, newer).unwrap();
+        assert_eq!(
+            store.pinned_commit("o/r".into(), 7).unwrap().as_deref(),
+            Some("deadbeef0000")
         );
     }
 
@@ -1118,5 +1594,7 @@ mod tests {
         );
         assert_eq!(detail.head_oid.len(), 40);
         assert!(detail.id.starts_with("PR_"));
+        // Nobody else's pending review is visible, and the viewer has none here.
+        assert_eq!(detail.pending_review, None);
     }
 }
