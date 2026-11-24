@@ -1,0 +1,332 @@
+import AppKit
+import SwiftUI
+
+/// Every file's diff in one lazy scroll, like GitHub, with a sticky header per file.
+/// Click a line to select it, shift-click to extend; Esc clears.
+struct DiffList: View {
+    let review: PRReview
+    let files: [DiffFileModel]
+    @Binding var expanded: [String: Bool]
+    @Binding var editor: DiffEditorTarget?
+    let scrollRequest: DiffScrollRequest?
+    let setViewed: (String, Bool) -> Void
+    /// Where a shift-click extends from: the last plain click, if it's still an end of the selection.
+    @State private var anchor: (path: String, row: Int)?
+    @State private var shownOutdated: Set<String> = []
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        let annotations = DiffAnnotations(threads: review.opened?.detail.threads ?? [], drafts: review.drafts)
+        let viewed = review.viewedPaths
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                    ForEach(files) { file in
+                        let isExpanded = expanded[file.id] ?? !(viewed.contains(file.id) || file.isLarge)
+                        let outdated = annotations.outdated[file.id] ?? []
+                        Section {
+                            if shownOutdated.contains(file.id) && !outdated.isEmpty {
+                                DiffOutdatedThreads(threads: outdated)
+                            }
+                            if isExpanded {
+                                content(of: file, annotations: annotations)
+                            } else if file.isLarge && !viewed.contains(file.id) {
+                                DiffNotice(text: "\(file.lineCount.formatted()) changed lines are hidden to keep scrolling fast.",
+                                           buttonTitle: "Show Diff") { expanded[file.id] = true }
+                            }
+                        } header: {
+                            DiffFileHeader(file: file, isExpanded: isExpanded, isViewed: viewed.contains(file.id),
+                                           outdatedCount: outdated.count,
+                                           isShowingOutdated: shownOutdated.contains(file.id)) {
+                                expanded[file.id] = !isExpanded
+                                // Collapsing from deep inside a file would otherwise leave you in the next one.
+                                if isExpanded { proxy.scrollTo(file.id, anchor: .top) }
+                            } toggleOutdated: {
+                                shownOutdated.formSymmetricDifference([file.id])
+                            } setViewed: { setViewed(file.id, $0) }
+                            .id(file.id)
+                        }
+                    }
+                }
+            }
+            .onChange(of: scrollRequest) { _, request in
+                if let request { proxy.scrollTo(request.path, anchor: .top) }
+            }
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isFocused)
+        .onKeyPress(.escape) {
+            guard review.selection != nil else { return .ignored }
+            review.selection = nil
+            return .handled
+        }
+    }
+
+    @ViewBuilder
+    private func content(of file: DiffFileModel, annotations: DiffAnnotations) -> some View {
+        if file.file.isBinary {
+            DiffNotice(text: "Binary file not shown.")
+        } else if file.rows.isEmpty {
+            DiffNotice(text: file.file.status == .renamed ? "File renamed without changes." : "No changes to show.")
+        } else {
+            let selected = file.rowRange(of: review.selection)
+            ForEach(file.rows) { row in
+                // One view per row, so the lazy stack can count rows without building them.
+                DiffRowView(row: row, numberWidth: file.numberWidth, isSelected: selected?.contains(row.id) ?? false,
+                            actionSelection: selected?.upperBound == row.id && editor == nil ? review.selection : nil,
+                            comments: comments(at: row, in: file, annotations: annotations),
+                            review: review, editor: $editor) { select(row.id, in: file) }
+                    .equatable()
+            }
+        }
+    }
+
+    private func comments(at row: DiffRow, in file: DiffFileModel, annotations: DiffAnnotations) -> DiffRowComments? {
+        guard case .line(let line) = row.kind else { return nil }
+        let anchors = DiffAnnotations.anchors(of: line, in: file.id)
+        let threads = anchors.flatMap { annotations.threads[$0] ?? [] }
+        let drafts = anchors.flatMap { annotations.drafts[$0] ?? [] }
+        let composing = editor?.newComment.flatMap {
+            DiffAnchor(path: $0.path, side: $0.side, line: $0.line) == anchors[0] ? $0 : nil
+        }
+        guard !threads.isEmpty || !drafts.isEmpty || composing != nil else { return nil }
+        return DiffRowComments(threads: threads, drafts: drafts, composing: composing, editor: editor)
+    }
+
+    private func select(_ row: Int, in file: DiffFileModel) {
+        isFocused = true
+        if NSEvent.modifierFlags.contains(.shift), let current = file.rowRange(of: review.selection) {
+            let from = anchor.flatMap { $0.path == file.id && ($0.row == current.lowerBound || $0.row == current.upperBound) ? $0.row : nil }
+                ?? current.lowerBound
+            review.selection = file.selection(from: min(from, row), to: max(from, row))
+        } else {
+            anchor = (file.id, row)
+            review.selection = file.selection(from: row, to: row)
+        }
+    }
+}
+
+/// What shows under a line. `editor` is included so rows redraw when it opens or closes.
+struct DiffRowComments: Equatable {
+    let threads: [ReviewThread]
+    let drafts: [DraftComment]
+    let composing: Selection?
+    let editor: DiffEditorTarget?
+}
+
+/// One row of a file's diff: a hunk header, or a line with its comments underneath.
+/// Equatable without its closures, so selection changes only redraw the rows they touch.
+struct DiffRowView: View, Equatable {
+    let row: DiffRow
+    let numberWidth: CGFloat
+    let isSelected: Bool
+    /// Set on the selection's last row, which carries the action bar.
+    let actionSelection: Selection?
+    let comments: DiffRowComments?
+    let review: PRReview
+    @Binding var editor: DiffEditorTarget?
+    let select: () -> Void
+
+    var body: some View {
+        switch row.kind {
+        case .hunk(let header):
+            DiffHunkRow(header: header, numberWidth: numberWidth)
+        case .line(let line):
+            VStack(alignment: .leading, spacing: 0) {
+                DiffLineRow(line: line, numberWidth: numberWidth, isSelected: isSelected)
+                    .onTapGesture(perform: select)
+                    // One element per line, selectable with VoiceOver like a click.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+                    .accessibilityAction { select() }
+                    .overlay(alignment: .trailing) {
+                        if let actionSelection {
+                            DiffSelectionBar(review: review) { editor = .newComment(actionSelection) }
+                        }
+                    }
+                if let comments {
+                    DiffLineComments(review: review, threads: comments.threads, drafts: comments.drafts,
+                                     composing: comments.composing, editor: $editor)
+                }
+            }
+        }
+    }
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.row == b.row && a.numberWidth == b.numberWidth && a.isSelected == b.isSelected
+            && a.actionSelection == b.actionSelection && a.comments == b.comments && a.review === b.review
+    }
+}
+
+/// One diff line: old number, new number, then the text, tinted by kind.
+struct DiffLineRow: View {
+    let line: DiffLine
+    let numberWidth: CGFloat
+    let isSelected: Bool
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            HStack(spacing: 0) {
+                Text(line.oldLine.map(String.init) ?? "").frame(width: numberWidth, alignment: .trailing)
+                Text(line.newLine.map(String.init) ?? "").frame(width: numberWidth, alignment: .trailing)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.trailing, 4)
+            .background(isSelected ? palette.accent.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.gutterOpacity))
+            Text(verbatim: marker + line.text)
+                .padding(.leading, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(DiffStyle.font)
+        .padding(.vertical, 1)
+        .background(isSelected ? palette.accent.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.rowOpacity))
+        .contentShape(Rectangle())
+    }
+
+    private var tint: Color {
+        switch line.kind {
+        case .added: palette.added
+        case .removed: palette.removed
+        case .context: .clear
+        }
+    }
+
+    private var marker: String {
+        switch line.kind {
+        case .added: "+ "
+        case .removed: "- "
+        case .context: "  "
+        }
+    }
+}
+
+/// "@@ -1,4 +1,5 @@ fn main()"; hunk headers can't take comments.
+struct DiffHunkRow: View {
+    let header: String
+    let numberWidth: CGFloat
+
+    var body: some View {
+        Text(verbatim: header)
+            .font(DiffStyle.font)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .padding(.leading, numberWidth * 2 + 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(DiffStyle.hunk)
+    }
+}
+
+/// The sticky bar above each file: collapse chevron, path, counts, outdated threads and Viewed.
+struct DiffFileHeader: View {
+    let file: DiffFileModel
+    let isExpanded: Bool
+    let isViewed: Bool
+    let outdatedCount: Int
+    let isShowingOutdated: Bool
+    let toggleExpanded: () -> Void
+    let toggleOutdated: () -> Void
+    let setViewed: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: toggleExpanded) {
+                Image(systemName: "chevron.right")
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? "Collapse this file" : "Expand this file")
+            DiffStatusMark(status: file.file.status)
+            DiffPathText(file: file.file, renameArrow: true)
+                .font(.callout)
+                .textSelection(.enabled)
+            DiffLineCounts(additions: file.additions, deletions: file.deletions)
+            Spacer(minLength: 8)
+            if outdatedCount > 0 {
+                Button(action: toggleOutdated) {
+                    Label(countLabel(outdatedCount, "outdated thread"), systemImage: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help(isShowingOutdated ? "Hide threads on lines no longer in the diff"
+                                        : "Show threads on lines no longer in the diff")
+            }
+            Toggle("Viewed", isOn: Binding(get: { isViewed }, set: setViewed))
+                .toggleStyle(.checkbox)
+                .font(.callout)
+                .help("Mark as viewed on GitHub. Viewed files stay collapsed")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) { Divider() }
+        .overlay(alignment: .top) { Divider() }
+    }
+}
+
+/// Threads whose lines are gone from the diff, listed at the top of their file.
+struct DiffOutdatedThreads: View {
+    let threads: [ReviewThread]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(threads, id: \.id) { DiffThreadView(thread: $0) }
+        }
+        .padding(12)
+        .frame(maxWidth: 820, alignment: .leading)
+    }
+}
+
+/// A line of explanation in place of a file's diff, with an optional action.
+struct DiffNotice: View {
+    let text: String
+    var buttonTitle: String?
+    var action: () -> Void = {}
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(text).foregroundStyle(.secondary)
+            if let buttonTitle {
+                Button(buttonTitle, action: action)
+                    .help("Lay out this file's diff; very large files can make scrolling slower")
+            }
+        }
+        .font(.callout)
+        .padding(12)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// Floats at the end of the selection: comment on it, or ask the agent about it.
+struct DiffSelectionBar: View {
+    let review: PRReview
+    let comment: () -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button(action: comment) {
+                Label("Comment", systemImage: "text.bubble")
+            }
+            .help("Draft a review comment on the selected lines")
+            Divider().frame(height: 12)
+            Button {
+                review.chatFocusRequest = UUID()
+            } label: {
+                Label("Ask Agent", systemImage: "sparkles")
+            }
+            .help("Ask the agent in the chat about the selected lines")
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color(nsColor: .separatorColor)))
+        .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+        .padding(.trailing, 8)
+    }
+}
