@@ -181,7 +181,7 @@ pub struct ThreadComment {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, Serialize, Deserialize)]
 pub enum ReviewEvent {
     Approve,
     RequestChanges,
@@ -203,10 +203,6 @@ pub struct DraftComment {
     pub author: DraftAuthor,
     /// The commit whose diff the lines refer to. All of a PR's drafts share one.
     pub commit_oid: String,
-    /// The pending GitHub review a submit put this draft in. Recorded before the
-    /// review is submitted, so a retry can tell whether that went through.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_id: Option<String>,
 }
 
 /// Input to `DraftStore::add`: a draft before it has an id.
@@ -281,6 +277,84 @@ impl GitHubClient {
         let variables = json!({ "input": { "pullRequestId": pull_request_id, "path": path } });
         parse_mutation(&self.graphql(mutation, variables).await?).map(drop)
     }
+}
+
+/// What the reviewer confirmed in the submit sheet.
+pub(crate) struct Submission {
+    pub pull_request_id: String,
+    pub commit_oid: String,
+    pub event: ReviewEvent,
+    pub body: String,
+    pub drafts: Vec<DraftComment>,
+}
+
+/// A submit whose drafts are in a pending review on GitHub, saved next to the
+/// drafts before the review is submitted. A retry settles it first, so a lost
+/// answer never leads to a second review, with or without drafts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SubmitAttempt {
+    pub review_id: String,
+    pub commit_oid: String,
+    pub event: ReviewEvent,
+    pub body: String,
+    /// The drafts in the review, as they were sent. One edited since is a different draft.
+    pub drafts: Vec<DraftComment>,
+}
+
+impl GitHubClient {
+    /// Submits a review in two steps: the drafts go into a pending review, which
+    /// is recorded next to them, then submitted. Returns the review's URL.
+    /// Retrying after any failure is safe: it never posts the review twice.
+    pub(crate) async fn submit_review(
+        &self,
+        store: &DraftStore,
+        repo: &str,
+        number: u64,
+        submission: Submission,
+    ) -> Result<String, CoreError> {
+        let earlier = store.attempt(repo, number)?;
+        let prepared = self
+            .prepare_review(
+                &submission.pull_request_id,
+                &submission.commit_oid,
+                &submission.drafts,
+                earlier.as_ref().map(|attempt| attempt.review_id.as_str()),
+            )
+            .await?;
+        let attempt = match (prepared, earlier) {
+            // An earlier try went through; only its answer was lost.
+            (Prepared::Submitted(url), Some(earlier)) => {
+                store
+                    .finish_attempt(repo, number, &earlier)
+                    .map_err(|error| posted_but(&url, error))?;
+                return Ok(url);
+            }
+            (Prepared::Submitted(url), None) => return Ok(url),
+            (Prepared::Pending(review_id), _) => SubmitAttempt {
+                review_id,
+                commit_oid: submission.commit_oid,
+                event: submission.event,
+                body: submission.body,
+                drafts: submission.drafts,
+            },
+        };
+        // Recorded before the last step: if its answer is lost, a retry finds the review submitted.
+        store.save_attempt(repo, number, Some(&attempt))?;
+        let url = self
+            .submit_pending_review(&attempt.review_id, attempt.event, &attempt.body)
+            .await?;
+        store
+            .finish_attempt(repo, number, &attempt)
+            .map_err(|error| posted_but(&url, error))?;
+        Ok(url)
+    }
+}
+
+fn posted_but(url: &str, error: CoreError) -> CoreError {
+    CoreError::Storage(format!(
+        "your review was posted ({url}), but its drafts couldn't be deleted ({error}). \
+         Submitting again deletes them without posting the review twice."
+    ))
 }
 
 /// What the first phase of a submit leaves.
@@ -892,7 +966,6 @@ impl DraftStore {
             body: draft.body,
             author: draft.author,
             commit_oid: draft.commit_oid,
-            review_id: None,
         };
         self.change(&repo, number, |drafts| {
             // Lines only mean something on one diff, and a review is submitted on one commit.
@@ -933,8 +1006,10 @@ impl DraftStore {
         })
     }
 
-    /// Deletes the PR's drafts, e.g. once GitHub accepted the review.
+    /// Deletes the PR's drafts and the record of an unfinished submit. A pending
+    /// review that submit started stays on github.com, as yours.
     pub fn clear(&self, repo: String, number: u64) -> Result<(), CoreError> {
+        write_file(&self.attempt_path(&repo, number)?, None)?;
         self.change(&repo, number, |drafts| {
             drafts.clear();
             Ok(())
@@ -943,33 +1018,63 @@ impl DraftStore {
 }
 
 impl DraftStore {
-    /// Records that a submit put these drafts in the pending review `review_id`.
-    pub(crate) fn mark_in_review(
+    /// The PR's unfinished submit, if a try stopped before it was settled.
+    pub(crate) fn attempt(
         &self,
         repo: &str,
         number: u64,
-        ids: &[String],
-        review_id: &str,
-    ) -> Result<(), CoreError> {
-        self.change(repo, number, |drafts| {
-            for draft in drafts.iter_mut().filter(|draft| ids.contains(&draft.id)) {
-                draft.review_id = Some(review_id.to_owned());
-            }
-            Ok(())
-        })
+    ) -> Result<Option<SubmitAttempt>, CoreError> {
+        let path = self.attempt_path(repo, number)?;
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+                CoreError::Storage(format!(
+                    "submit record {} is corrupt ({e}). It names a review that may already be on GitHub: \
+                     check there, then move the file aside to submit again.",
+                    path.display()
+                ))
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::Storage(format!(
+                "couldn't read {}: {e}",
+                path.display()
+            ))),
+        }
     }
 
-    /// Deletes the drafts that went out in `review_id`. Drafts added since stay.
-    pub(crate) fn remove_reviewed(
+    /// Records an unfinished submit, or with `None` forgets it.
+    pub(crate) fn save_attempt(
         &self,
         repo: &str,
         number: u64,
-        review_id: &str,
+        attempt: Option<&SubmitAttempt>,
+    ) -> Result<(), CoreError> {
+        let path = self.attempt_path(repo, number)?;
+        let json = attempt.map(|attempt| {
+            serde_json::to_vec_pretty(attempt).expect("a submit record serializes to JSON")
+        });
+        write_file(&path, json)?;
+        self.notify(repo, number);
+        Ok(())
+    }
+
+    /// Settles a submit GitHub accepted: deletes the drafts it sent, unless
+    /// edited since, then its record. Drafts added meanwhile stay.
+    pub(crate) fn finish_attempt(
+        &self,
+        repo: &str,
+        number: u64,
+        attempt: &SubmitAttempt,
     ) -> Result<(), CoreError> {
         self.change(repo, number, |drafts| {
-            drafts.retain(|draft| draft.review_id.as_deref() != Some(review_id));
+            drafts.retain(|draft| !attempt.drafts.contains(draft));
             Ok(())
-        })
+        })?;
+        self.save_attempt(repo, number, None)
+    }
+
+    /// Next to the drafts file, so it's moved or deleted with it.
+    fn attempt_path(&self, repo: &str, number: u64) -> Result<PathBuf, CoreError> {
+        Ok(self.path(repo, number)?.with_extension("submit.json"))
     }
 
     fn path(&self, repo: &str, number: u64) -> Result<PathBuf, CoreError> {
@@ -1003,11 +1108,15 @@ impl DraftStore {
             *drafts = edited;
         }
         // Outside the cache lock: the listener may call `list` right away.
+        self.notify(repo, number);
+        Ok(())
+    }
+
+    fn notify(&self, repo: &str, number: u64) {
         let listener = lock(&self.listener).clone();
         if let Some(listener) = listener {
             listener.drafts_changed(repo.to_owned(), number);
         }
-        Ok(())
     }
 }
 
@@ -1040,19 +1149,24 @@ fn load(path: &Path) -> Result<Vec<DraftComment>, CoreError> {
     }
 }
 
-/// Writes a temp file and renames it over the old one, so a crash mid-write
-/// can't leave a truncated file. No drafts means no file.
+/// No drafts means no file.
 fn save(path: &Path, drafts: &[DraftComment]) -> Result<(), CoreError> {
-    let storage = |e: io::Error| {
-        CoreError::Storage(format!("couldn't save drafts to {}: {e}", path.display()))
-    };
-    if drafts.is_empty() {
+    let json = (!drafts.is_empty())
+        .then(|| serde_json::to_vec_pretty(drafts).expect("drafts serialize to JSON"));
+    write_file(path, json)
+}
+
+/// Writes a temp file and renames it over the old one, so a crash mid-write
+/// can't leave a truncated file. `None` deletes the file.
+fn write_file(path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
+    let storage =
+        |e: io::Error| CoreError::Storage(format!("couldn't save {}: {e}", path.display()));
+    let Some(json) = json else {
         return match fs::remove_file(path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(storage(e)),
             _ => Ok(()),
         };
-    }
-    let json = serde_json::to_vec_pretty(drafts).expect("drafts serialize to JSON");
+    };
     let tmp = path.with_extension("json.tmp");
     fs::create_dir_all(path.parent().expect("draft paths have a parent")).map_err(storage)?;
     let mut file = fs::File::create(&tmp).map_err(storage)?;
@@ -1380,7 +1494,6 @@ mod tests {
                 name: "claude".into(),
             },
             commit_oid: "abc".into(),
-            review_id: None,
         }
     }
 
@@ -1772,25 +1885,57 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "[{ not json");
     }
 
+    fn attempt(drafts: Vec<DraftComment>) -> SubmitAttempt {
+        SubmitAttempt {
+            review_id: "PRR_1".into(),
+            commit_oid: "c0ffee0123456789".into(),
+            event: ReviewEvent::Approve,
+            body: "LGTM".into(),
+            drafts,
+        }
+    }
+
     #[test]
-    fn removes_only_the_drafts_a_review_sent() {
+    fn records_a_submit_without_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        store(&dir)
+            .save_attempt("o/r", 7, Some(&attempt(vec![])))
+            .unwrap();
+        // Survives a restart, so a retry after a lost answer still finds the review.
+        let reopened = store(&dir);
+        assert_eq!(reopened.attempt("O/R", 7).unwrap(), Some(attempt(vec![])));
+        reopened.finish_attempt("o/r", 7, &attempt(vec![])).unwrap();
+        assert_eq!(reopened.attempt("o/r", 7).unwrap(), None);
+    }
+
+    #[test]
+    fn finishing_a_submit_removes_only_the_drafts_it_sent() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let sent = store.add("o/r".into(), 7, new_draft("sent")).unwrap();
-        store.mark_in_review("o/r", 7, &[sent.id], "PRR_1").unwrap();
-        // Survives a restart, so a retry after a lost answer still knows the review.
-        assert_eq!(
-            DraftStore::new(dir.path().to_str().unwrap().into())
-                .list("o/r".into(), 7)
-                .unwrap()[0]
-                .review_id
-                .as_deref(),
-            Some("PRR_1")
-        );
+        store
+            .save_attempt("o/r", 7, Some(&attempt(vec![sent])))
+            .unwrap();
         // An agent drafts while GitHub is still answering.
         let late = store.add("o/r".into(), 7, new_draft("late")).unwrap();
-        store.remove_reviewed("o/r", 7, "PRR_1").unwrap();
+        store
+            .finish_attempt("o/r", 7, &store.attempt("o/r", 7).unwrap().unwrap())
+            .unwrap();
         assert_eq!(store.list("o/r".into(), 7).unwrap(), [late]);
+        assert_eq!(store.attempt("o/r", 7).unwrap(), None);
+    }
+
+    #[test]
+    fn discarding_drafts_forgets_an_unfinished_submit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let draft = store.add("o/r".into(), 7, new_draft("x")).unwrap();
+        store
+            .save_attempt("o/r", 7, Some(&attempt(vec![draft])))
+            .unwrap();
+        store.clear("o/r".into(), 7).unwrap();
+        assert_eq!(store.attempt("o/r", 7).unwrap(), None);
+        assert!(!draft_file(&dir).exists());
     }
 
     #[test]

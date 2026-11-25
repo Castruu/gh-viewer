@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, STOP_UNRESPONSIVE, own_mcp_server_name};
 use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable, remove_agent_config};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
-use crate::pr::{DraftAuthor, DraftStore, NewDraft, Prepared, PullRequestDetail, ReviewEvent, ReviewThread};
+use crate::pr::{DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread, Submission};
 use crate::{CoreError, DiffSide, GitHubClient};
 
 /// PR descriptions longer than this are cut in prompts; the agent can read the rest with `get_pr_context`.
@@ -47,6 +47,8 @@ pub struct ReviewHub {
     /// Latest state per PR. Shared with that PR's MCP tools so they see a refresh.
     reviews: Mutex<HashMap<Key, Arc<RwLock<OpenedReview>>>>,
     sessions: Sessions,
+    /// Held while a PR's review is submitted, so two submits can't both start one.
+    submits: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 struct SessionInfo {
@@ -83,6 +85,7 @@ impl ReviewHub {
             mcp,
             reviews: Mutex::new(HashMap::new()),
             sessions,
+            submits: Mutex::default(),
         }
     }
 
@@ -227,35 +230,17 @@ impl ReviewHub {
         body: String,
     ) -> Result<String, CoreError> {
         let key = (repo.clone(), number);
+        let submitting = self.submits.lock().unwrap().entry(key.clone()).or_default().clone();
+        let _submitting = submitting.lock().await;
         let (pull_request_id, head) = {
             let review = self.review(&key)?;
             let review = review.read().unwrap();
             (review.detail.id.clone(), review.checkout.head_oid.clone())
         };
         let drafts = self.drafts.list(repo.clone(), number)?;
-        let commit = drafts.first().map(|d| d.commit_oid.clone()).unwrap_or(head);
-        let earlier = drafts.iter().find_map(|draft| draft.review_id.clone());
-        let prepared = self
-            .github
-            .prepare_review(&pull_request_id, &commit, &drafts, earlier.as_deref())
-            .await?;
-        let (review_id, url) = match prepared {
-            Prepared::Submitted(url) => (earlier.unwrap_or_default(), url),
-            Prepared::Pending(review_id) => {
-                // Recorded before submitting: if the answer is lost, a retry finds the review submitted.
-                let ids: Vec<String> = drafts.iter().map(|draft| draft.id.clone()).collect();
-                self.drafts.mark_in_review(&repo, number, &ids, &review_id)?;
-                let url = self.github.submit_pending_review(&review_id, event, &body).await?;
-                (review_id, url)
-            }
-        };
-        self.drafts.remove_reviewed(&repo, number, &review_id).map_err(|error| {
-            CoreError::Storage(format!(
-                "your review was posted ({url}), but its drafts couldn't be deleted ({error}). \
-                 Submitting again deletes them without posting the review twice."
-            ))
-        })?;
-        Ok(url)
+        let commit_oid = drafts.first().map(|d| d.commit_oid.clone()).unwrap_or(head);
+        let submission = Submission { pull_request_id, commit_oid, event, body, drafts };
+        self.github.submit_review(&self.drafts, &repo, number, submission).await
     }
 }
 
