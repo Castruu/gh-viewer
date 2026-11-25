@@ -37,9 +37,11 @@ BIN_DIR="$(swift build --package-path app -c release --show-bin-path)"
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/$APP_NAME" "$APP/Contents/MacOS/"
 cp app/Info.plist "$APP/Contents/"
+# Rendered from docs/assets/icon.svg.
+cp app/AppIcon.icns "$APP/Contents/Resources/"
 # Ad-hoc signature: enough to run locally, not for distribution.
 codesign --force --sign - "$APP"
 
