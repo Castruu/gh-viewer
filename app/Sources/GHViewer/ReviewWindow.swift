@@ -211,6 +211,7 @@ private struct PRHeader: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
+                ReviewIcon(decision: pullRequest.reviewDecision)
                 Text(byline)
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)

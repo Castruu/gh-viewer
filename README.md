@@ -66,9 +66,10 @@ The menu bar shows the PRs that wait on your review (the icon shows how many)
 and your own open PRs, five of each, with a link to the window for the rest.
 Click one to review it, right-click to open it in your browser.
 
-Each row says what the PR does, then its repo, number, age and size. A status shows
-only when there is news: Checks failing, Changes requested, Draft, Approved or
-Checks running.
+Each row has the review decision as an icon on the left (approved, changes
+requested, review required, or none yet), then what the PR does, its repo,
+number, age and size. A status in words shows when there is news: Checks failing,
+Changes requested, Draft, Approved or Checks running.
 
 It refreshes every 2 minutes (every 10 in Low Power Mode), and when you open the
 menu if the data is more than 30 seconds old. **⌘R** refreshes now. A notification
