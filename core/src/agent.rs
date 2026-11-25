@@ -232,6 +232,8 @@ struct Session {
     cancelled: Arc<tokio::sync::Notify>,
     /// Names of the app's MCP servers passed in `session/new`.
     mcp_servers: Vec<String>,
+    /// Whether the adapter supports `session/close`.
+    closes: bool,
 }
 
 struct PendingPermission {
@@ -245,6 +247,7 @@ struct Process {
     id: u64,
     cx: ConnectionTo<Agent>,
     mcp_http: bool,
+    closes: bool,
     stderr: Stderr,
     /// The connection shuts the process down once every clone is dropped.
     _shutdown: Arc<oneshot::Sender<()>>,
@@ -343,6 +346,7 @@ impl AgentHub {
             cx: process.cx,
             cancelled: Arc::default(),
             mcp_servers: names,
+            closes: process.closes,
         };
         shared.sessions.insert(session_id.clone(), session);
         Ok(session_id)
@@ -390,6 +394,24 @@ impl AgentHub {
         shared
             .permissions
             .retain(|_, pending| pending.session_id != session_id);
+    }
+
+    /// Ends a session for good: stops its turn, answers its permission requests
+    /// as cancelled and, when the adapter supports it, sends `session/close` so
+    /// the agent frees it (Claude keeps a CLI process per session).
+    pub fn close_session(&self, session_id: String) {
+        self.cancel(session_id.clone());
+        let mut shared = self.shared();
+        if let Some(session) = shared.sessions.get(&session_id)
+            && session.closes
+        {
+            // The session is gone for the app either way, so the reply doesn't matter.
+            session
+                .cx
+                .send_request(acp::CloseSessionRequest::new(session_id.clone()))
+                .detach();
+        }
+        shared.forget(&[session_id]);
     }
 
     /// Answers a PermissionRequest. `None` means the user dismissed it (ACP "cancelled" outcome).
@@ -493,6 +515,7 @@ impl AgentHub {
             id,
             cx,
             mcp_http: false,
+            closes: false,
             stderr,
             _shutdown: Arc::new(shutdown_tx),
         };
@@ -524,8 +547,10 @@ impl AgentHub {
                 process.stderr.tail()
             ))
         })?;
+        let capabilities = response.agent_capabilities;
         Ok(Process {
-            mcp_http: response.agent_capabilities.mcp_capabilities.http,
+            mcp_http: capabilities.mcp_capabilities.http,
+            closes: capabilities.session_capabilities.close.is_some(),
             ..process
         })
     }
@@ -1012,11 +1037,26 @@ mod tests {
             .on_receive_request(
                 async |request: acp::InitializeRequest, responder, _cx| {
                     let mcp = acp::McpCapabilities::new().http(true);
-                    let capabilities = acp::AgentCapabilities::new().mcp_capabilities(mcp);
+                    let sessions = acp::SessionCapabilities::new().close(acp::SessionCloseCapabilities::new());
+                    let capabilities = acp::AgentCapabilities::new()
+                        .mcp_capabilities(mcp)
+                        .session_capabilities(sessions);
                     responder.respond(
                         acp::InitializeResponse::new(request.protocol_version)
                             .agent_capabilities(capabilities),
                     )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |request: acp::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    // Says "closed" so tests can see the request arrive.
+                    let chunk = acp::ContentChunk::new("closed".into());
+                    cx.send_notification(acp::SessionNotification::new(
+                        request.session_id,
+                        acp::SessionUpdate::AgentMessageChunk(chunk),
+                    ))?;
+                    responder.respond(acp::CloseSessionResponse::new())
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -1293,6 +1333,22 @@ mod tests {
         // No PermissionRequest in between: the fake agent got "yes", its allow_once option.
         assert_eq!(events.recv().await, Some((session, message("yes"))));
         assert_eq!(turn.await.unwrap().unwrap(), "end_turn");
+    }
+
+    #[tokio::test]
+    async fn closes_sessions_on_the_agent() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Claude, "/tmp".into(), vec![])
+            .await
+            .unwrap();
+        hub.close_session(session.clone());
+        assert_eq!(
+            events.recv().await,
+            Some((session.clone(), message("closed")))
+        );
+        let error = hub.prompt(session, "ping".into()).await.unwrap_err();
+        assert!(error.to_string().contains("session has ended"), "{error}");
     }
 
     #[tokio::test]

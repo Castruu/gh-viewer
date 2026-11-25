@@ -191,9 +191,10 @@ impl ReviewHub {
     }
 
     /// Ends a session the app no longer uses, e.g. after Clear Chat: stops its
-    /// turn, revokes its MCP endpoint and forgets it. The agent process keeps running.
+    /// turn, closes it on the agent, revokes its MCP endpoint and forgets it.
+    /// The agent process keeps running.
     pub fn close_agent(&self, session_id: String) {
-        self.agents.cancel(session_id.clone());
+        self.agents.close_session(session_id.clone());
         let removed = self.sessions.lock().unwrap().remove(&session_id);
         if let (Some(info), Some(mcp)) = (removed, self.mcp.get()) {
             mcp.unregister(&info.endpoint);
