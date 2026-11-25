@@ -238,14 +238,14 @@ impl CheckoutManager {
         } else {
             None
         };
-        // A creation stopped between `worktree add --no-checkout` and the checkout
-        // leaves the head set but no index: its files were never checked out.
-        let checked_out = current.is_some()
-            && git(&["-C", wt, "rev-parse", "--git-path", "index"])
-                .await
-                .is_ok_and(|index| Path::new(wt).join(index.trim()).exists());
         let checkout_error =
             || remote_error(&repo, format!("Couldn't check out PR #{number} of {repo}"));
+        // A creation stopped between `worktree add --no-checkout` and the checkout
+        // leaves the head set but no index: its files were never checked out.
+        let unfinished = match current {
+            Some(_) => index_missing(wt).await.map_err(checkout_error())?,
+            None => false,
+        };
         if current.is_none() {
             if Path::new(wt).exists() {
                 remove_dir(wt).await?;
@@ -276,7 +276,7 @@ impl CheckoutManager {
         // Already at the head: keep whatever the agent changed. Otherwise local edits
         // are discarded on purpose: the worktree is the agent's scratch space. No
         // `git clean`, so untracked build caches survive.
-        if !checked_out || current.as_deref().map(str::trim) != Some(head_oid.as_str()) {
+        if unfinished || current.as_deref().map(str::trim) != Some(head_oid.as_str()) {
             git(&["-C", wt, "checkout", "--quiet", "--force", "--detach", &head_oid])
                 .await
                 .map_err(checkout_error())?;
@@ -407,6 +407,18 @@ fn git_version(output: &str) -> Option<((u32, u32), &str)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some(((major, minor), version))
+}
+
+/// Whether the worktree `wt` has no index. Only a confirmed NotFound counts:
+/// any other failure is an error, so a worktree with edits is never checked
+/// out again because a probe failed.
+async fn index_missing(wt: &str) -> Result<bool, String> {
+    let index = git(&["-C", wt, "rev-parse", "--git-path", "index"]).await?;
+    match std::fs::symlink_metadata(Path::new(wt).join(index.trim())) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("couldn't read the worktree's index: {error}")),
+    }
 }
 
 /// What agents read as config from the root of their cwd.
@@ -1230,6 +1242,29 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
         assert_eq!(too_old_for_sparse("git version 2.35.0"), None);
         assert_eq!(too_old_for_sparse("git version 2.50.1 (Apple Git-155)"), None);
         assert_eq!(too_old_for_sparse(""), None);
+    }
+
+    #[tokio::test]
+    async fn tells_a_missing_index_from_a_failed_probe() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let repo = repo.to_str().unwrap();
+        std::fs::create_dir_all(repo).unwrap();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let head = commit(repo, &[("a.txt", "one\n")]);
+        assert!(!index_missing(repo).await.unwrap());
+
+        let wt = format!("{}/wt", tmp.path().display());
+        run(repo, &["worktree", "add", "-q", "--no-checkout", "--detach", &wt, &head]);
+        assert!(index_missing(&wt).await.unwrap());
+
+        // A probe that can't tell is an error, not "missing".
+        let gitdir = format!("{repo}/.git/worktrees/wt");
+        std::fs::set_permissions(&gitdir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let probed = index_missing(&wt).await;
+        std::fs::set_permissions(&gitdir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(probed.is_err(), "{probed:?}");
     }
 
     #[test]
