@@ -25,9 +25,13 @@ extension FocusedValues {
 /// typing in the chat or a comment never triggers one.
 struct ReviewCommands: Commands {
     @FocusedValue(\.reviewActions) private var actions
+    @AppStorage(DiffFileList.showsKey) private var showsFiles = true
 
     var body: some Commands {
         CommandMenu("Review") {
+            Button(showsFiles ? "Hide File Tree" : "Show File Tree") { showsFiles.toggle() }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+            Divider()
             Group {
                 Button("Next File") { actions?.nextFile() }
                     .keyboardShortcut(.downArrow, modifiers: [.command, .option])
