@@ -126,9 +126,9 @@ struct DiffPane: View {
                 }
             } message: {
                 if let pending = review.unsettled?.reviewUrl {
-                    Text("Your drafts and the agent's are deleted here. Some are already in your pending review on github.com, which stays there: submit or delete it there (\(pending)).")
+                    Text("Your drafts and the agent's are deleted here. An earlier submit put some in your pending review on github.com, which isn't deleted and may still be there: submit or delete it there (\(pending)).")
                 } else {
-                    Text("Your drafts and the agent's are deleted. They haven't been posted, so they can't be recovered.")
+                    Text("Your drafts and the agent's are deleted here. Ones that haven't been posted can't be recovered.")
                 }
             }
         }

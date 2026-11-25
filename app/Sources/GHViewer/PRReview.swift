@@ -152,8 +152,13 @@ final class PRReview {
     /// a pending review an unsettled submit left there stays, and the result says so.
     func discardDrafts() async {
         do {
-            if let pending = try await store.hub.discard(repo: repo, number: number) {
-                actionError = "Your drafts are deleted here, but your review with them is still pending on github.com. Submit or delete it there: \(pending)"
+            switch try await store.hub.discard(repo: repo, number: number) {
+            case .pending(let url)?:
+                actionError = "Your drafts are deleted here, but your review with them is still pending on github.com. Submit or delete it there: \(url)"
+            case .unknown(let url)?:
+                actionError = "Your drafts are deleted here. Your review with them may still be pending on github.com; GitHub couldn't be checked: \(url)"
+            case nil:
+                break
             }
         } catch {
             actionError = error.coreMessage

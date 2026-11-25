@@ -536,6 +536,19 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// What a discarded submit leaves pending on github.com, as far as GitHub says.
+    pub(crate) async fn left_on_github(&self, record: &SubmitAttempt) -> Option<LeftOnGitHub> {
+        let lookup = match self.viewer().await {
+            Ok(viewer) if viewer.id == record.viewer_id => {
+                self.remote_review(&record.review_id).await
+            }
+            // Another account can't see that review, so GitHub can't say.
+            Ok(viewer) => Err(CoreError::Api(format!("signed in as {}", viewer.login))),
+            Err(error) => Err(error),
+        };
+        what_is_left(&lookup, &record.review_url)
+    }
+
     async fn viewer(&self) -> Result<Account, CoreError> {
         let (mut data, messages) = split_response(&self.graphql(VIEWER, json!({})).await?)?;
         let viewer = data
@@ -594,13 +607,25 @@ pub(crate) struct RemoteReview {
     pub comments: Vec<PendingComment>,
 }
 
-/// Whether a looked-up review may still be pending on github.com. Without an
-/// answer, it may be.
-pub(crate) fn may_be_pending(lookup: &Result<Option<RemoteReview>, CoreError>) -> bool {
+/// What a discarded submit's review is on github.com.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum LeftOnGitHub {
+    /// Still pending there, for you to submit or delete.
+    Pending { url: String },
+    /// GitHub couldn't be asked, so it may still be pending.
+    Unknown { url: String },
+}
+
+/// What a looked-up review leaves on github.com: nothing once it's submitted or gone.
+fn what_is_left(
+    lookup: &Result<Option<RemoteReview>, CoreError>,
+    url: &str,
+) -> Option<LeftOnGitHub> {
+    let url = url.to_owned();
     match lookup {
-        Ok(Some(review)) => review.state == "PENDING",
-        Ok(None) => false,
-        Err(_) => true,
+        Ok(Some(review)) if review.state == "PENDING" => Some(LeftOnGitHub::Pending { url }),
+        Ok(_) => None,
+        Err(_) => Some(LeftOnGitHub::Unknown { url }),
     }
 }
 
@@ -2147,16 +2172,23 @@ mod tests {
     }
 
     #[test]
-    fn a_discarded_review_is_still_pending_unless_github_says_otherwise() {
+    fn tells_a_pending_discarded_review_from_one_github_couldnt_check() {
+        let url = "https://github.com/o/r/pull/7#pullrequestreview-9";
         let (_, review, _) = recovery_case("PENDING");
-        assert!(may_be_pending(&Ok(Some(review.clone()))));
-        assert!(may_be_pending(&Err(CoreError::Network("offline".into()))));
-        assert!(!may_be_pending(&Ok(None)));
+        assert_eq!(
+            what_is_left(&Ok(Some(review.clone())), url),
+            Some(LeftOnGitHub::Pending { url: url.into() })
+        );
+        assert_eq!(
+            what_is_left(&Err(CoreError::Network("offline".into())), url),
+            Some(LeftOnGitHub::Unknown { url: url.into() })
+        );
+        assert_eq!(what_is_left(&Ok(None), url), None);
         let submitted = RemoteReview {
             state: "APPROVED".into(),
             ..review
         };
-        assert!(!may_be_pending(&Ok(Some(submitted))));
+        assert_eq!(what_is_left(&Ok(Some(submitted)), url), None);
     }
 
     #[test]

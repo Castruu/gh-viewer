@@ -51,7 +51,8 @@ struct SubmitReviewSheet: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let pending = review.pendingCommentCount, pending > 0 {
+            let pending = startedOnGitHub
+            if pending > 0 {
                 Label("Also submits \(countLabel(pending, "comment")) you started on github.com.", systemImage: "info.circle")
                     .foregroundStyle(.secondary)
             }
@@ -104,10 +105,15 @@ struct SubmitReviewSheet: View {
         isOwnPullRequest && event != .comment
     }
 
+    /// Comments in your pending review on github.com that aren't these drafts; submitting sends them too.
+    private var startedOnGitHub: Int {
+        PRReview.startedOnGitHub(review.opened?.detail.pendingReview?.comments ?? [], drafts: confirmed)
+    }
+
     /// GitHub only accepts an approval without a body or comments.
     private var isEmpty: Bool {
         event != .approve && message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && confirmed.isEmpty && (review.pendingCommentCount ?? 0) == 0
+            && confirmed.isEmpty && startedOnGitHub == 0
     }
 
     private func send() {

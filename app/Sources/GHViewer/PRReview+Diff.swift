@@ -25,18 +25,32 @@ extension PRReview {
         String(opened?.checkout.headOid.prefix(7) ?? "")
     }
 
-    /// Comments you started on github.com in your pending review, which submitting sends too.
-    /// Drafts from here that an earlier try already put in it don't count.
-    var pendingCommentCount: Int? {
-        opened?.detail.pendingReview.map { Self.startedOnGitHub($0.comments, drafts: drafts) }
-    }
-
-    /// How many of `comments` aren't one of `drafts`, matched like the core does: path, line and text.
+    /// How many of `comments` aren't one of `drafts`, paired one to one as the core does: path,
+    /// original range, text, and side where a comment's is known.
     nonisolated static func startedOnGitHub(_ comments: [PendingComment], drafts: [DraftComment]) -> Int {
         let trimmed = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines) }
-        return comments.filter { comment in
-            !drafts.contains { $0.path == comment.path && $0.line == comment.line && trimmed($0.body) == trimmed(comment.body) }
-        }.count
+        // A single-line range is sent without a start line, whichever way it was stored.
+        let start = { (start: UInt32?, line: UInt32?) in start == line ? nil : start }
+        let same = { (draft: DraftComment, comment: PendingComment) in
+            comment.path == draft.path && comment.originalLine == draft.line
+                && start(comment.originalStartLine, comment.originalLine) == start(draft.startLine, draft.line)
+                && trimmed(comment.body) == trimmed(draft.body)
+                && (comment.side == .right || draft.side == .left)
+        }
+        var used = Array(repeating: false, count: comments.count)
+        var found = Array(repeating: false, count: drafts.count)
+        // Known-left comments first, so a draft that could take either leaves them be.
+        for left in [true, false] {
+            for (index, draft) in drafts.enumerated() where !found[index] {
+                if let match = comments.indices.first(where: {
+                    !used[$0] && (comments[$0].side == .left) == left && same(draft, comments[$0])
+                }) {
+                    used[match] = true
+                    found[index] = true
+                }
+            }
+        }
+        return used.filter { !$0 }.count
     }
 }
 
