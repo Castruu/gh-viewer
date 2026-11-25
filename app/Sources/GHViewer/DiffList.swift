@@ -315,7 +315,8 @@ struct DiffFileNotesView: View {
     private func location(of comment: PendingComment) -> String {
         guard let line = comment.line else { return "Whole file" }
         let commit = review.opened?.detail.pendingReview?.commitOid.prefix(7) ?? ""
-        return "Line \(line) on \(commit.isEmpty ? "an earlier commit" : String(commit))"
+        let lines = comment.startLine.map { $0 == line ? "Line \(line)" : "Lines \($0)–\(line)" } ?? "Line \(line)"
+        return "\(lines) on \(commit.isEmpty ? "an earlier commit" : String(commit))"
     }
 }
 
