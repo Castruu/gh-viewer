@@ -295,11 +295,11 @@ enum DiffStyle {
     static let font = Font.system(size: 12, design: .monospaced)
     static let digitWidth = ("0" as NSString)
         .size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]).width
-    static let rowOpacity = 0.09
-    static let gutterOpacity = 0.15
+    static let rowOpacity = 0.14
+    static let gutterOpacity = 0.24
     static let selectedOpacity = 0.26
     /// Hunk headers stay neutral, since every palette's hues belong to states.
-    static let hunk = Color.primary.opacity(0.03)
+    static let hunk = Color.primary.opacity(0.05)
 }
 
 extension String {

@@ -16,7 +16,47 @@ func relativeTime(_ date: Date, now: Date) -> String {
     return relativeFormatter.localizedString(for: date, relativeTo: now)
 }
 
-/// A PR's state as a colored dot and a word. One thing only, the one most worth knowing:
+/// The review decision as an icon, at the left of a PR wherever it's listed.
+struct ReviewIcon: View {
+    let decision: ReviewDecision?
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        Image(systemName: symbol)
+            .foregroundStyle(color)
+            .frame(width: 16)
+            .help(label)
+    }
+
+    private var symbol: String {
+        switch decision {
+        case .approved: "checkmark.circle.fill"
+        case .changesRequested: "xmark.circle.fill"
+        case .reviewRequired: "clock"
+        case nil: "circle.dashed"
+        }
+    }
+
+    private var color: Color {
+        switch decision {
+        case .approved: palette.pass
+        case .changesRequested: palette.fail
+        case .reviewRequired: palette.pending
+        case nil: .secondary
+        }
+    }
+
+    private var label: String {
+        switch decision {
+        case .approved: "Approved"
+        case .changesRequested: "Changes requested"
+        case .reviewRequired: "Review required"
+        case nil: "No review decision"
+        }
+    }
+}
+
+/// A PR's state in a word, in that state's color. One thing only, the one most worth knowing:
 /// what's broken, then what's decided, then what's still running. Nothing for a PR with no news.
 struct PRStatusText: View {
     let pullRequest: PullRequest
@@ -24,15 +64,10 @@ struct PRStatusText: View {
 
     var body: some View {
         if let status {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(status.color)
-                    .frame(width: 6, height: 6)
-                Text(status.text)
-                    .foregroundStyle(.secondary)
-            }
-            .lineLimit(1)
-            .fixedSize()
+            Text(status.text)
+                .foregroundStyle(status.color)
+                .lineLimit(1)
+                .fixedSize()
         }
     }
 
@@ -52,17 +87,20 @@ struct PRRowLabel: View {
     let pullRequest: PullRequest
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(pullRequest.title.withoutCommitPrefix)
-                .lineLimit(1)
-            HStack(spacing: 6) {
-                Text(subtitle)
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            ReviewIcon(decision: pullRequest.reviewDecision)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(pullRequest.title.withoutCommitPrefix)
                     .lineLimit(1)
-                Spacer(minLength: 4)
-                PRStatusText(pullRequest: pullRequest)
+                HStack(spacing: 6) {
+                    Text(subtitle)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    PRStatusText(pullRequest: pullRequest)
+                }
+                .font(.caption)
             }
-            .font(.caption)
         }
         .help("\(pullRequest.repo) #\(pullRequest.number) by \(pullRequest.author ?? "ghost"): \(pullRequest.title)")
     }
