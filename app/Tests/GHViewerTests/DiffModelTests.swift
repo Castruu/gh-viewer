@@ -8,10 +8,13 @@ struct DiffModelTests {
                  hunks: [hunk(start: 1, count: 2), hunk(start: 20, count: 1)]),
         index: 0)
 
-    @Test func selectionsStayWithinOneHunk() {
+    @Test func selectionsMayCrossHunksButCommentsMayNot() {
         #expect(file.selection(from: 1, to: 2)?.line == 2)
-        #expect(file.selection(from: 1, to: 4) == nil)
-        #expect(file.selection(from: 4, to: 4)?.line == 20)
+        // Kept for asking the agent about both changes.
+        let across = file.selection(from: 1, to: 4)
+        #expect(across?.startLine == 1 && across?.line == 20)
+        #expect(!file.crossesHunks(1...2))
+        #expect(file.crossesHunks(1...4))
     }
 }
 

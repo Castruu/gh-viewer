@@ -54,14 +54,17 @@ struct DiffFileModel: Identifiable {
         numberWidth = CGFloat(String(largest).count) * DiffStyle.digitWidth + 12
     }
 
-    /// The selection spanning rows `start...end`, which must both be lines. Nil across a hunk
-    /// header: GitHub takes a multi-line comment only within one hunk.
+    /// The selection spanning rows `start...end`, which must both be lines. It may cross hunks,
+    /// which is fine for asking the agent; see `crossesHunks` for commenting.
     func selection(from start: Int, to end: Int) -> Selection? {
-        guard case .line(let first) = rows[start].kind, case .line(let last) = rows[end].kind,
-              !rows[start...end].contains(where: \.isHunk)
-        else { return nil }
+        guard case .line(let first) = rows[start].kind, case .line(let last) = rows[end].kind else { return nil }
         let from = first.anchor(in: id), to = last.anchor(in: id)
         return Selection(path: id, startLine: from.line, startSide: from.side, line: to.line, side: to.side)
+    }
+
+    /// GitHub takes a multi-line comment only within one hunk.
+    func crossesHunks(_ rows: ClosedRange<Int>) -> Bool {
+        self.rows[rows].contains(where: \.isHunk)
     }
 
     /// The rows `selection` covers, if it's in this file and its lines are in the diff.

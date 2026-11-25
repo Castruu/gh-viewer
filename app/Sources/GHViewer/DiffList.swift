@@ -93,6 +93,7 @@ struct DiffList: View {
                                 ? review.selection : nil,
                             // Varies only on the bar's row, so opening an editor doesn't redraw every row.
                             canComment: editor == nil || selected?.upperBound != row.position,
+                            crossesHunks: selected.map { $0.upperBound == row.position && file.crossesHunks($0) } ?? false,
                             comments: comments(at: row, in: file, annotations: annotations),
                             review: review, editor: $editor) { select(row.position, in: file) }
                     .equatable()
@@ -113,18 +114,15 @@ struct DiffList: View {
         return DiffRowComments(threads: threads, pending: pending, drafts: drafts, composing: composing, editor: editor)
     }
 
-    /// A shift-click extends the selection within its hunk; across a hunk header it starts a new one.
     private func select(_ row: Int, in file: DiffFileModel) {
         if NSEvent.modifierFlags.contains(.shift), let current = file.rowRange(of: review.selection) {
             let from = anchor.flatMap { $0.path == file.id && ($0.row == current.lowerBound || $0.row == current.upperBound) ? $0.row : nil }
                 ?? current.lowerBound
-            if let extended = file.selection(from: min(from, row), to: max(from, row)) {
-                review.selection = extended
-                return
-            }
+            review.selection = file.selection(from: min(from, row), to: max(from, row))
+        } else {
+            anchor = (file.id, row)
+            review.selection = file.selection(from: row, to: row)
         }
-        anchor = (file.id, row)
-        review.selection = file.selection(from: row, to: row)
     }
 }
 
@@ -147,6 +145,8 @@ struct DiffRowView: View, Equatable {
     let actionSelection: Selection?
     /// False while another editor is open, so its text isn't lost.
     let canComment: Bool
+    /// Set on the bar's row when the selection spans hunks, which GitHub won't take a comment on.
+    let crossesHunks: Bool
     let comments: DiffRowComments?
     let review: PRReview
     @Binding var editor: DiffEditorTarget?
@@ -166,7 +166,9 @@ struct DiffRowView: View, Equatable {
                     .accessibilityAction { select() }
                     .overlay(alignment: .trailing) {
                         if let actionSelection {
-                            DiffSelectionBar(review: review, canComment: canComment) { editor = .newComment(actionSelection) }
+                            DiffSelectionBar(review: review, canComment: canComment, crossesHunks: crossesHunks) {
+                                editor = .newComment(actionSelection)
+                            }
                         }
                     }
                 if let comments {
@@ -180,7 +182,8 @@ struct DiffRowView: View, Equatable {
 
     static func == (a: Self, b: Self) -> Bool {
         a.row == b.row && a.numberWidth == b.numberWidth && a.isSelected == b.isSelected
-            && a.actionSelection == b.actionSelection && a.canComment == b.canComment && a.comments == b.comments && a.review === b.review
+            && a.actionSelection == b.actionSelection && a.canComment == b.canComment && a.crossesHunks == b.crossesHunks
+            && a.comments == b.comments && a.review === b.review
     }
 }
 
@@ -359,6 +362,7 @@ struct DiffNotice: View {
 struct DiffSelectionBar: View {
     let review: PRReview
     let canComment: Bool
+    let crossesHunks: Bool
     let comment: () -> Void
     @Environment(\.palette) private var palette
 
@@ -367,8 +371,9 @@ struct DiffSelectionBar: View {
             Button(action: comment) {
                 Label("Comment", systemImage: "text.bubble")
             }
-            .disabled(!canComment || review.isReloading)
+            .disabled(!canComment || crossesHunks || review.isReloading)
             .help(review.isReloading ? PRReview.reloadingHelp
+                  : crossesHunks ? "GitHub takes a comment on one hunk only. Select lines within one hunk to comment; you can still ask the agent about these"
                   : canComment ? "Draft a review comment on the selected lines" : "Finish the open comment first")
             Divider().frame(height: 12)
             Button {
