@@ -39,7 +39,7 @@ const ENV_MARKER: &str = "__GHV_SHELL_ENV_5f1c__";
 
 /// Prefix of the name the app registers its MCP server under in `session/new`,
 /// followed by a random part per session (see [`own_mcp_server_name`]).
-const MCP_SERVER_NAME: &str = "gh-viewer";
+const MCP_SERVER_NAME: &str = "ghv"; // Short: Claude names tools `mcp__<server>__<tool>`, often capped at 64 characters.
 /// Its tools. They're local and reversible (drafts stay local until the user
 /// submits them), so their permission requests are allowed once without asking.
 pub(crate) const MCP_TOOLS: [&str; 3] = ["get_pr_context", "list_review_threads", "draft_comment"];
@@ -1435,7 +1435,7 @@ mod tests {
             .new_session(AgentKind::Codex, "/skips-mcp".into(), vec![server("http://skips")])
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("didn't start GH Viewer's review tools (MCP server `gh-viewer-1a2b3c4d`)"), "{error}");
+        assert!(error.to_string().contains("didn't start GH Viewer's review tools (MCP server `ghv-1a2b3c4d`)"), "{error}");
         // The agent had made the session, so it's closed there too.
         closed_on_the_agent("http://skips Authorization=Bearer t").await;
     }
@@ -1456,7 +1456,7 @@ mod tests {
     /// The app's server as the fake agent sees it; the session id it returns is `"{url} Authorization=Bearer t"`.
     fn server(url: &str) -> McpServerHttp {
         McpServerHttp {
-            name: "gh-viewer-1a2b3c4d".into(),
+            name: "ghv-1a2b3c4d".into(),
             url: url.into(),
             headers: vec![HttpHeader { name: "Authorization".into(), value: "Bearer t".into() }],
         }
@@ -1492,7 +1492,7 @@ mod tests {
         // The Codex rule doesn't apply to Claude's payloads, nor the reverse.
         assert_eq!(allow(&request, AgentKind::Codex), None);
         // Only the session's own server name counts.
-        let other_session = ["gh-viewer-1a2b3c4d".to_string()];
+        let other_session = ["ghv-1a2b3c4d".to_string()];
         assert_eq!(auto_allow(AgentKind::Claude, &request, &other_session, &mut HashMap::new()), None);
         assert_eq!(auto_allow(AgentKind::Claude, &request, &[], &mut HashMap::new()), None);
 
@@ -1559,7 +1559,7 @@ mod tests {
         ))
         .unwrap();
         track_own_codex_call(&mut calls, &session_id, &own, &other.update);
-        track_own_codex_call(&mut calls, &session_id, &["gh-viewer-1a2b3c4d".into()], &notification.update);
+        track_own_codex_call(&mut calls, &session_id, &["ghv-1a2b3c4d".into()], &notification.update);
         assert!(calls.is_empty());
 
         // A finished call is forgotten.
@@ -1582,17 +1582,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_names_fit_the_usual_64_character_limit() {
+        let server = own_mcp_server_name();
+        assert!(server.starts_with("ghv-") && server.len() == 4 + 32, "{server}");
+        for tool in MCP_TOOLS {
+            let name = format!("mcp__{server}__{tool}");
+            assert!(name.len() <= 64, "{name} is {} characters", name.len());
+        }
+    }
+
+    #[test]
     fn reads_codex_reports_of_mcp_servers_it_didnt_start() {
         // As codex-acp 2.12's McpStartupReporter renders a skipped server.
         let skipped: acp::SessionUpdate = serde_json::from_value(serde_json::json!({
             "sessionUpdate": "tool_call",
-            "toolCallId": "mcp_startup.gh-viewer-1a2b3c4d.0b9e",
-            "title": "mcp__gh-viewer-1a2b3c4d__startup",
+            "toolCallId": "mcp_startup.ghv-1a2b3c4d.0b9e",
+            "title": "mcp__ghv-1a2b3c4d__startup",
             "kind": "other",
             "status": "failed",
         }))
         .unwrap();
-        assert_eq!(failed_mcp_startup(&skipped).as_deref(), Some("gh-viewer-1a2b3c4d"));
+        assert_eq!(failed_mcp_startup(&skipped).as_deref(), Some("ghv-1a2b3c4d"));
         let notification: acp::SessionNotification = serde_json::from_str(CODEX_TOOL_CALL).unwrap();
         assert_eq!(failed_mcp_startup(&notification.update), None);
     }
