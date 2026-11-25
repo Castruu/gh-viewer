@@ -80,7 +80,11 @@ struct DiffList: View {
             ForEach(file.rows) { row in
                 // One view per row, so the lazy stack can count rows without building them.
                 DiffRowView(row: row, numberWidth: file.numberWidth, isSelected: selected?.contains(row.position) ?? false,
-                            actionSelection: selected?.upperBound == row.position && editor == nil ? review.selection : nil,
+                            // Hidden while that selection's own composer is open right below it.
+                            actionSelection: selected?.upperBound == row.position && editor?.newComment != review.selection
+                                ? review.selection : nil,
+                            // Varies only on the bar's row, so opening an editor doesn't redraw every row.
+                            canComment: editor == nil || selected?.upperBound != row.position,
                             comments: comments(at: row, in: file, annotations: annotations),
                             review: review, editor: $editor) { select(row.position, in: file) }
                     .equatable()
@@ -128,6 +132,8 @@ struct DiffRowView: View, Equatable {
     let isSelected: Bool
     /// Set on the selection's last row, which carries the action bar.
     let actionSelection: Selection?
+    /// False while another editor is open, so its text isn't lost.
+    let canComment: Bool
     let comments: DiffRowComments?
     let review: PRReview
     @Binding var editor: DiffEditorTarget?
@@ -147,7 +153,7 @@ struct DiffRowView: View, Equatable {
                     .accessibilityAction { select() }
                     .overlay(alignment: .trailing) {
                         if let actionSelection {
-                            DiffSelectionBar(review: review) { editor = .newComment(actionSelection) }
+                            DiffSelectionBar(review: review, canComment: canComment) { editor = .newComment(actionSelection) }
                         }
                     }
                 if let comments {
@@ -160,7 +166,7 @@ struct DiffRowView: View, Equatable {
 
     static func == (a: Self, b: Self) -> Bool {
         a.row == b.row && a.numberWidth == b.numberWidth && a.isSelected == b.isSelected
-            && a.actionSelection == b.actionSelection && a.comments == b.comments && a.review === b.review
+            && a.actionSelection == b.actionSelection && a.canComment == b.canComment && a.comments == b.comments && a.review === b.review
     }
 }
 
@@ -309,6 +315,7 @@ struct DiffNotice: View {
 /// Floats at the end of the selection: comment on it, or ask the agent about it.
 struct DiffSelectionBar: View {
     let review: PRReview
+    let canComment: Bool
     let comment: () -> Void
 
     var body: some View {
@@ -316,7 +323,8 @@ struct DiffSelectionBar: View {
             Button(action: comment) {
                 Label("Comment", systemImage: "text.bubble")
             }
-            .help("Draft a review comment on the selected lines")
+            .disabled(!canComment)
+            .help(canComment ? "Draft a review comment on the selected lines" : "Finish the open comment first")
             Divider().frame(height: 12)
             Button {
                 review.chatFocusRequest = UUID()
