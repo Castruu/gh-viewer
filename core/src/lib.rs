@@ -157,6 +157,8 @@ pub struct Dashboard {
 #[derive(uniffi::Object)]
 pub struct GitHubClient {
     http: reqwest::Client,
+    /// Set on a client from `pinned`: every call uses this token.
+    token: Option<String>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -169,7 +171,7 @@ impl GitHubClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("default reqwest client should build");
-        Self { http }
+        Self { http, token: None }
     }
 
     /// Fetches the viewer's open PRs and the PRs awaiting their review.
@@ -180,6 +182,15 @@ impl GitHubClient {
 }
 
 impl GitHubClient {
+    /// This client with the token gh has now, used for every call, so a `gh auth
+    /// switch` midway can't split one submit or lookup between two accounts.
+    pub(crate) async fn pinned(&self) -> Result<GitHubClient, CoreError> {
+        Ok(Self {
+            http: self.http.clone(),
+            token: Some(gh_token().await?),
+        })
+    }
+
     /// Posts a GraphQL request and returns the raw body of a 2xx response.
     /// GraphQL-level `errors` are left for the caller, which knows whether
     /// partial data is usable.
@@ -189,7 +200,10 @@ impl GitHubClient {
         variables: serde_json::Value,
     ) -> Result<String, CoreError> {
         // Read the token on every call so `gh auth login`/`switch` takes effect without a restart.
-        let token = gh_token().await?;
+        let token = match &self.token {
+            Some(token) => token.clone(),
+            None => gh_token().await?,
+        };
         let response = self
             .http
             .post(GRAPHQL_URL)

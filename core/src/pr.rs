@@ -372,8 +372,10 @@ impl GitHubClient {
         number: u64,
         submission: Submission,
     ) -> Result<SubmitResult, CoreError> {
+        // One account for the whole submit, even if gh switches midway.
+        let github = self.pinned().await?;
         let mut resume = None;
-        let viewer = self.viewer().await?;
+        let viewer = github.viewer().await?;
         // An earlier submit is settled first, by what GitHub has of its review now.
         if let Some(record) = store.attempt(repo, number)? {
             if record.pr_node_id != submission.pull_request_id {
@@ -390,12 +392,16 @@ impl GitHubClient {
                     record.viewer_login, viewer.login
                 )));
             }
-            let remote = self.remote_review(&record.review_id).await.map_err(|error| {
-                CoreError::Api(format!(
-                    "couldn't check the review an earlier submit started ({error}). Retrying is \
-                     safe: it won't post the review twice."
-                ))
-            })?;
+            let remote = github
+                .remote_review(&record.review_id)
+                .await
+                .map_err(|error| {
+                    CoreError::Api(format!(
+                        "couldn't check the review an earlier submit started ({}). Retrying \
+                         is safe: it won't post the review twice.",
+                        detail(&error)
+                    ))
+                })?;
             match (recover(&record, remote.as_ref(), &submission), remote) {
                 (Recovery::Forget, _) | (_, None) => store.save_attempt(repo, number, None)?,
                 (Recovery::Resume, Some(remote)) => resume = Some((record.review_id, remote)),
@@ -411,20 +417,23 @@ impl GitHubClient {
                 (Recovery::Posted, Some(remote)) => {
                     // An earlier try went through as asked; only its answer was lost.
                     let sent = sent_in(&record, &remote);
-                    return Ok(posted(
-                        remote.url,
-                        store.finish_attempt(repo, number, &sent),
-                    ));
+                    let warning = finish(store, repo, number, &record.drafts, &sent);
+                    return Ok(SubmitResult {
+                        url: remote.url,
+                        warning,
+                    });
                 }
                 (Recovery::PostedDifferently, Some(remote)) => {
                     // What GitHub posted mustn't stay sendable; the rest stays for a new review.
                     let sent = sent_in(&record, &remote);
                     let cleanup = match store.finish_attempt(repo, number, &sent) {
                         Ok(()) => String::new(),
-                        Err(error) => format!(
-                            " Removing the posted ones here failed ({error}), so check your \
-                             drafts before submitting again."
+                        Err(error) if record_kept(store, repo, number) => format!(
+                            " But removing them here failed ({}); submitting again finishes \
+                             that, and won't post them twice.",
+                            detail(&error)
                         ),
+                        Err(error) => format!(" Saving that here failed ({}).", detail(&error)),
                     };
                     return Err(CoreError::Api(format!(
                         "an earlier submit was already posted as {} on commit {}: {}. This \
@@ -440,10 +449,10 @@ impl GitHubClient {
 
         let (review_id, pending_url) = match resume {
             Some((review_id, remote)) => {
-                self.add_threads(&submission, &review_id, &remote).await?;
+                github.add_threads(&submission, &review_id, &remote).await?;
                 (review_id, remote.url)
             }
-            None => self.start(&submission).await?,
+            None => github.start(&submission).await?,
         };
         let record = SubmitAttempt {
             pr_node_id: submission.pull_request_id,
@@ -466,22 +475,26 @@ impl GitHubClient {
             }
         }
         let variables = submit_pending_variables(&record.review_id, record.event, &record.body);
-        let url = self
-            .graphql(SUBMIT_PENDING, variables)
-            .await
-            .and_then(|response| parse_mutation(&response))
-            .and_then(|data| review_url(&data, "/submitPullRequestReview/pullRequestReview/url"))
-            .map_err(|error| {
-                CoreError::Api(format!(
-                    "submitting your review failed ({error}). Retrying is safe: it won't post \
-                     the review twice."
-                ))
-            })?;
-        // GitHub has it now: whatever happens here, it's a success.
-        Ok(posted(
-            url,
-            store.finish_attempt(repo, number, &record.drafts),
-        ))
+        let url = submitted_url(github.graphql(SUBMIT_PENDING, variables).await)?;
+        // GitHub has it now: whatever happens here, it's a success. Only the drafts
+        // its review holds are removed; one deleted on github.com meanwhile stays.
+        let warning = match github.read_review(&record.review_id).await {
+            Ok(Some(remote)) => finish(
+                store,
+                repo,
+                number,
+                &record.drafts,
+                &sent_in(&record, &remote),
+            ),
+            other => Some(format!(
+                "Your review was posted, but checking which drafts it holds failed ({}), so \
+                 they're kept here. Submit again to finish: it won't post twice.",
+                other
+                    .err()
+                    .map_or("GitHub didn't find it".into(), |e| detail(&e))
+            )),
+        };
+        Ok(SubmitResult { url, warning })
     }
 
     /// Phase 1 without a record: puts the drafts in the viewer's pending review
@@ -495,13 +508,13 @@ impl GitHubClient {
                 .await?,
         )?;
         if let Some(pending) = pending {
-            check_pending_commit(&pending, &submission.commit_oid)?;
-            // Every comment it has, not just the first page the lookup reads.
+            // Every comment it has, not just the first page the lookup reads, and its commit for sure.
             let remote = self.remote_review(&pending.id).await?.ok_or_else(|| {
                 CoreError::Api(
                     "your pending review on github.com was just deleted. Try again.".into(),
                 )
             })?;
+            check_pending_commit(&remote.commit_oid, &submission.commit_oid)?;
             self.add_threads(submission, &pending.id, &remote).await?;
             return Ok((pending.id, remote.url));
         }
@@ -536,9 +549,10 @@ impl GitHubClient {
         // Retrying after a failure is safe: drafts already in the pending review are skipped.
         let partial = |added: usize, error: CoreError| {
             CoreError::Api(format!(
-                "added {added} of {} comments to your pending review on GitHub, then failed: {error}. \
+                "added {added} of {} comments to your pending review on GitHub, then failed: {}. \
                  Retrying is safe: comments already added are skipped.",
-                new.len()
+                new.len(),
+                detail(&error)
             ))
         };
         for (added, draft) in new.iter().enumerate() {
@@ -563,12 +577,16 @@ impl GitHubClient {
 
     /// What a discarded submit leaves pending on github.com, as far as GitHub says.
     pub(crate) async fn left_on_github(&self, record: &SubmitAttempt) -> Option<LeftOnGitHub> {
-        let lookup = match self.viewer().await {
-            Ok(viewer) if viewer.id == record.viewer_id => {
-                self.remote_review(&record.review_id).await
-            }
-            // Another account can't see that review, so GitHub can't say.
-            Ok(viewer) => Err(CoreError::Api(format!("signed in as {}", viewer.login))),
+        // One account for the check and the lookup.
+        let lookup = match self.pinned().await {
+            Ok(github) => match github.viewer().await {
+                Ok(viewer) if viewer.id == record.viewer_id => {
+                    github.read_review(&record.review_id).await
+                }
+                // Another account can't see that review, so GitHub can't say.
+                Ok(viewer) => Err(CoreError::Api(format!("signed in as {}", viewer.login))),
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         };
         what_is_left(&lookup, &record.review_url)
@@ -597,12 +615,29 @@ impl GitHubClient {
         serde_json::from_value(viewer).map_err(unexpected)
     }
 
-    /// A review by id with all its comments. `None` only when GitHub says the
-    /// node isn't found, which for a review means it was deleted while pending.
+    /// A review by id with all its comments and its commit. `None` only when
+    /// GitHub says the node isn't found, which for a review means it was deleted
+    /// while pending.
     pub(crate) async fn remote_review(
         &self,
         review_id: &str,
     ) -> Result<Option<RemoteReview>, CoreError> {
+        let review = self.read_review(review_id).await?;
+        // GitHub can leave a review's commit out for a moment, e.g. right after a
+        // submit. That's unknown, not another commit.
+        if !review
+            .as_ref()
+            .is_some_and(|review| review.commit_oid.is_empty())
+        {
+            return Ok(review);
+        }
+        tokio::time::sleep(COMMIT_REREAD).await;
+        known_commit(self.read_review(review_id).await?)
+    }
+
+    /// `remote_review` without waiting for a commit GitHub left out, for reads
+    /// that only need the state or the comments.
+    async fn read_review(&self, review_id: &str) -> Result<Option<RemoteReview>, CoreError> {
         let mut review: Option<RemoteReview> = None;
         let mut after: Option<String> = None;
         loop {
@@ -638,9 +673,25 @@ pub(crate) struct RemoteReview {
     pub viewer_did_author: bool,
     pub url: String,
     pub body: String,
-    /// Empty if GitHub no longer has the commit.
+    /// Never empty from `remote_review`, which fails instead. `read_review` may
+    /// leave it empty.
     pub commit_oid: String,
     pub comments: Vec<PendingComment>,
+}
+
+/// How long to wait before reading a review again whose commit GitHub left out.
+const COMMIT_REREAD: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A review whose commit is still unknown can't be settled yet; trying again later is safe.
+fn known_commit(review: Option<RemoteReview>) -> Result<Option<RemoteReview>, CoreError> {
+    match review {
+        Some(review) if review.commit_oid.is_empty() => Err(CoreError::Api(
+            "GitHub didn't say which commit your review is on. Try again in a moment: it \
+             won't post the review twice."
+                .into(),
+        )),
+        review => Ok(review),
+    }
 }
 
 /// What a discarded submit's review is on github.com.
@@ -757,17 +808,109 @@ fn stayed(drafts: &[DraftComment], sent: &[DraftComment]) -> String {
     }
 }
 
-/// A review GitHub has, and how cleaning up after it went here.
-fn posted(url: String, cleanup: Result<(), CoreError>) -> SubmitResult {
-    SubmitResult {
-        warning: cleanup.err().map(|error| {
-            format!(
-                "Your review was posted, but cleaning up its drafts here failed ({error}). Don't \
-                 submit it again; delete the drafts it sent yourself."
-            )
-        }),
-        url,
+/// Settles a submit GitHub posted: removes the `recorded` drafts its review
+/// holds (`sent`), then the record. Returns a warning for recorded drafts it
+/// doesn't hold, which stay, and for a cleanup that failed, worded by what's left.
+fn finish(
+    store: &DraftStore,
+    repo: &str,
+    number: u64,
+    recorded: &[DraftComment],
+    sent: &[DraftComment],
+) -> Option<String> {
+    let mut warnings = Vec::new();
+    let left_out: Vec<String> = recorded
+        .iter()
+        .filter(|draft| !sent.contains(draft))
+        .map(|draft| format!("{}:{}", draft.path, draft.line))
+        .collect();
+    if !left_out.is_empty() {
+        warnings.push(format!(
+            "Your review was posted without {} of its drafts, maybe deleted on github.com \
+             meanwhile. They're still here: {}.",
+            left_out.len(),
+            left_out.join(", ")
+        ));
     }
+    if let Err(error) = store.finish_attempt(repo, number, sent) {
+        warnings.push(if record_kept(store, repo, number) {
+            format!(
+                "Your review was posted, but cleaning up here failed ({}). Submit again to \
+                 finish: it won't post twice.",
+                detail(&error)
+            )
+        } else {
+            format!(
+                "Your review was posted and its drafts removed, but saving that here failed \
+                 ({}). Don't submit it again.",
+                detail(&error)
+            )
+        });
+    }
+    (!warnings.is_empty()).then(|| warnings.join(" "))
+}
+
+/// Whether the submit record is still here: then submitting again settles it
+/// by what GitHub has, and can't post twice.
+fn record_kept(store: &DraftStore, repo: &str, number: u64) -> bool {
+    matches!(store.attempt(repo, number), Ok(Some(_)))
+}
+
+/// An error's text without the "GitHub API error:" its own message would add again.
+fn detail(error: &CoreError) -> String {
+    match error {
+        CoreError::Api(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The review's URL from `SUBMIT_PENDING`'s answer, or why there's none. Typed
+/// GraphQL errors without a review are GitHub refusing it, so nothing was
+/// posted. Anything else may have been, and a retry settles it.
+fn submitted_url(response: Result<String, CoreError>) -> Result<String, CoreError> {
+    #[derive(Deserialize)]
+    struct Response {
+        #[serde(default)]
+        data: Value,
+        #[serde(default)]
+        errors: Vec<TypedError>,
+    }
+    let unknown = |why: String| {
+        CoreError::Api(format!(
+            "submitting your review failed ({why}). Retrying is safe: it won't post the \
+             review twice."
+        ))
+    };
+    let body = response.map_err(|error| unknown(detail(&error)))?;
+    let response: Response = serde_json::from_str(&body)
+        .map_err(|error| unknown(format!("unexpected response: {error}")))?;
+    let url = response
+        .data
+        .pointer("/submitPullRequestReview/pullRequestReview/url")
+        .and_then(Value::as_str);
+    let messages: Vec<&str> = response.errors.iter().map(|e| e.message.as_str()).collect();
+    match url {
+        Some(url) if messages.is_empty() => Ok(url.to_owned()),
+        None if !messages.is_empty() && response.errors.iter().all(|e| !e.kind.is_empty()) => {
+            Err(CoreError::Api(format!(
+                "GitHub refused the review: {}. Nothing was posted, and your pending review is \
+                 kept on github.com. Change the verdict or fix the cause, then submit again.",
+                messages.join("; ")
+            )))
+        }
+        _ if messages.is_empty() => Err(unknown("GitHub's response had no review URL".into())),
+        _ => Err(unknown(messages.join("; "))),
+    }
+}
+
+/// A GraphQL error with GitHub's `type`, e.g. NOT_FOUND. Errors like timeouts have none.
+#[derive(Deserialize)]
+struct TypedError {
+    #[serde(rename = "type", default)]
+    kind: String,
+    message: String,
+    #[serde(default)]
+    path: Vec<Value>,
 }
 
 /// Parses a page of `REMOTE_REVIEW`: the review and the cursor of the next page
@@ -780,14 +923,6 @@ fn parse_review_page(body: &str) -> Result<Option<(RemoteReview, Option<String>)
         data: Value,
         #[serde(default)]
         errors: Vec<TypedError>,
-    }
-    #[derive(Deserialize)]
-    struct TypedError {
-        #[serde(rename = "type", default)]
-        kind: String,
-        message: String,
-        #[serde(default)]
-        path: Vec<Value>,
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -828,13 +963,6 @@ fn parse_review_page(body: &str) -> Result<Option<(RemoteReview, Option<String>)
         },
         next,
     )))
-}
-
-fn review_url(data: &Value, pointer: &str) -> Result<String, CoreError> {
-    data.pointer(pointer)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| CoreError::Api("GitHub's response had no review URL".into()))
 }
 
 fn event_name(event: ReviewEvent) -> &'static str {
@@ -886,14 +1014,14 @@ fn submit_pending_variables(pending_review_id: &str, event: ReviewEvent, body: &
 
 /// A pending review is submitted on the commit it was started on, so for any
 /// verdict, even an approval with no new comments, that must be the one under review.
-fn check_pending_commit(pending: &PendingReview, commit_oid: &str) -> Result<(), CoreError> {
-    if pending.commit_oid == commit_oid {
+fn check_pending_commit(pending_commit: &str, commit_oid: &str) -> Result<(), CoreError> {
+    if pending_commit == commit_oid {
         return Ok(());
     }
     Err(CoreError::Api(format!(
         "your pending review on github.com is on commit {}, but you're reviewing {}. \
          Submit or cancel it on github.com, then try again.",
-        short_oid(&pending.commit_oid),
+        short_oid(pending_commit),
         short_oid(commit_oid)
     )))
 }
@@ -1055,6 +1183,17 @@ fn parse_pr_page(body: &str, repo: &str, number: u64) -> Result<PrPage, CoreErro
         .map(Value::take)
         .unwrap_or_default();
     if pr.is_null() {
+        // A PR that's missing or hidden from you comes with NOT_FOUND. Other
+        // errors, e.g. a timeout, say why there's no PR this time.
+        #[derive(Deserialize)]
+        struct Errors {
+            #[serde(default)]
+            errors: Vec<TypedError>,
+        }
+        let errors: Errors = serde_json::from_str(body).map_err(unexpected)?;
+        if errors.errors.iter().any(|error| error.kind != "NOT_FOUND") {
+            return Err(api_error(messages));
+        }
         return Err(CoreError::Api(format!(
             "{repo}#{number} wasn't found, or your gh account can't see it"
         )));
@@ -1932,6 +2071,13 @@ mod tests {
                 "GitHub API error: o/r#9 wasn't found, or your gh account can't see it"
             );
         }
+        // Any other error says why there's no PR this time.
+        let timeout = r#"{ "data": { "repository": { "pullRequest": null } },
+          "errors": [ { "message": "Something went wrong while executing your query." } ] }"#;
+        assert_eq!(
+            parse_pr_page(timeout, "o/r", 9).unwrap_err().to_string(),
+            "GitHub API error: Something went wrong while executing your query."
+        );
     }
 
     #[test]
@@ -2040,16 +2186,97 @@ mod tests {
     }
 
     #[test]
-    fn a_posted_review_is_a_success_even_if_cleanup_fails() {
-        let url = "https://github.com/o/r/pull/7#pullrequestreview-9";
-        assert_eq!(posted(url.into(), Ok(())).warning, None);
-        let failed = posted(url.into(), Err(CoreError::Storage("disk full".into())));
-        assert_eq!(failed.url, url);
-        let warning = failed.warning.unwrap();
+    fn a_posted_review_removes_only_the_drafts_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let sent = store.add("o/r".into(), 7, new_draft("sent")).unwrap();
+        let gone = store
+            .add("o/r".into(), 7, new_draft("deleted on github.com"))
+            .unwrap();
+        let recorded = [sent.clone(), gone.clone()];
+        store
+            .save_attempt("o/r", 7, Some(&attempt(recorded.to_vec())))
+            .unwrap();
+
+        let warning = finish(&store, "o/r", 7, &recorded, std::slice::from_ref(&sent)).unwrap();
         assert!(
-            warning.contains("disk full") && warning.contains("Don't submit it again"),
+            warning.contains("without 1 of its drafts") && warning.contains("src/pr.rs:3"),
             "{warning}"
         );
+        assert_eq!(store.list("o/r".into(), 7).unwrap(), [gone]);
+        assert_eq!(store.attempt("o/r", 7).unwrap(), None);
+        assert_eq!(finish(&store, "o/r", 7, &[], &[]), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_cleanup_keeps_the_record_and_says_to_submit_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let sent = store.add("o/r".into(), 7, new_draft("sent")).unwrap();
+        store
+            .save_attempt("o/r", 7, Some(&attempt(vec![sent.clone()])))
+            .unwrap();
+        let drafts_dir = draft_file(&dir).parent().unwrap().to_owned();
+        let mode = |mode| fs::set_permissions(&drafts_dir, fs::Permissions::from_mode(mode));
+        mode(0o555).unwrap();
+        let warning = finish(
+            &store,
+            "o/r",
+            7,
+            std::slice::from_ref(&sent),
+            std::slice::from_ref(&sent),
+        );
+        mode(0o755).unwrap();
+
+        let warning = warning.unwrap();
+        assert!(warning.contains("Submit again to finish"), "{warning}");
+        assert!(!warning.contains("GitHub API error"), "{warning}");
+        assert!(store.attempt("o/r", 7).unwrap().is_some());
+        assert_eq!(store.list("o/r".into(), 7).unwrap(), [sent]);
+    }
+
+    #[test]
+    fn tells_a_refusal_from_an_unknown_failure() {
+        let ok = r#"{ "data": { "submitPullRequestReview": { "pullRequestReview": { "url": "u#r" } } } }"#;
+        assert_eq!(submitted_url(Ok(ok.into())).unwrap(), "u#r");
+
+        let refused = r#"{ "data": { "submitPullRequestReview": null }, "errors": [ { "type": "UNPROCESSABLE",
+            "path": ["submitPullRequestReview"], "message": "Can not approve your own pull request" } ] }"#;
+        let message = submitted_url(Ok(refused.into())).unwrap_err().to_string();
+        assert_eq!(message.matches("GitHub API error").count(), 1, "{message}");
+        assert!(
+            message.contains("Can not approve your own pull request")
+                && message.contains("Nothing was posted")
+                && !message.contains("Retrying"),
+            "{message}"
+        );
+
+        // A timeout has no type: GitHub may have posted it.
+        let timeout = r#"{ "data": null, "errors": [ { "message": "Something went wrong while executing your query." } ] }"#;
+        let lost = Err(CoreError::Api("HTTP 502 Bad Gateway".into()));
+        for answer in [Ok(timeout.into()), lost] {
+            let message = submitted_url(answer).unwrap_err().to_string();
+            assert_eq!(message.matches("GitHub API error").count(), 1, "{message}");
+            assert!(message.contains("Retrying is safe"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_review_whose_commit_github_left_out_isnt_settled() {
+        let (_, review, _) = recovery_case("COMMENTED");
+        assert_eq!(known_commit(None).unwrap(), None);
+        assert_eq!(
+            known_commit(Some(review.clone())).unwrap(),
+            Some(review.clone())
+        );
+        let unknown = RemoteReview {
+            commit_oid: String::new(),
+            ..review
+        };
+        let message = known_commit(Some(unknown)).unwrap_err().to_string();
+        assert!(message.contains("won't post the review twice"), "{message}");
     }
 
     #[test]
@@ -2345,14 +2572,9 @@ mod tests {
 
     #[test]
     fn refuses_a_pending_review_on_another_commit() {
-        let pending = |commit: &str| PendingReview {
-            id: "PRR_1".into(),
-            commit_oid: commit.into(),
-            comments: vec![],
-        };
         let head = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
-        assert!(check_pending_commit(&pending(head), head).is_ok());
-        let message = check_pending_commit(&pending("1234567890abcdef"), head)
+        assert!(check_pending_commit(head, head).is_ok());
+        let message = check_pending_commit("1234567890abcdef", head)
             .unwrap_err()
             .to_string();
         assert!(
