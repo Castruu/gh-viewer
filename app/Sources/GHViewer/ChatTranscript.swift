@@ -382,10 +382,14 @@ private struct ChatPermissionCard: View {
     private var buttons: some View {
         ForEach(options, id: \.id) { option in
             let allows = option.kind.hasPrefix("allow")
-            Button(option.name) { respond(option.id) }
-                .buttonStyle(.borderedProminent)
-                .tint(allows ? palette.pass : palette.fail)
-                .help(allows ? "Let the agent run this" : "Don't let the agent run this")
+            // Icon and color rather than a filled style, which turns gray while the window is inactive.
+            Button(role: allows ? nil : .destructive) {
+                respond(option.id)
+            } label: {
+                Label(option.name, systemImage: allows ? "checkmark" : "xmark")
+                    .foregroundStyle(allows ? palette.pass : palette.fail)
+            }
+            .help(allows ? "Let the agent run this" : "Don't let the agent run this")
         }
         Button("Dismiss") { respond(nil) }
             .help("Answer neither; the agent treats the request as cancelled")
