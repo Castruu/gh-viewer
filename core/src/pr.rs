@@ -1438,7 +1438,7 @@ impl DraftStore {
             drafts.clear();
             Ok(())
         })?;
-        write_file(&self.attempt_path(&repo, number)?, None)
+        write_file(&self.root, &self.attempt_path(&repo, number)?, None)
     }
 }
 
@@ -1498,7 +1498,7 @@ impl DraftStore {
         let json = attempt.map(|attempt| {
             serde_json::to_vec_pretty(attempt).expect("a submit record serializes to JSON")
         });
-        write_file(&path, json)?;
+        write_file(&self.root, &path, json)?;
         self.notify(repo, number);
         Ok(())
     }
@@ -1550,7 +1550,7 @@ impl DraftStore {
             // Edit a copy so a failed save leaves the cache matching the disk.
             let mut edited = drafts.clone();
             edit(&mut edited)?;
-            save(&path, &edited)?;
+            save(&self.root, &path, &edited)?;
             *drafts = edited;
         }
         // Outside the cache lock: the listener may call `list` right away.
@@ -1596,23 +1596,23 @@ fn load(path: &Path) -> Result<Vec<DraftComment>, CoreError> {
 }
 
 /// No drafts means no file.
-fn save(path: &Path, drafts: &[DraftComment]) -> Result<(), CoreError> {
+fn save(root: &Path, path: &Path, drafts: &[DraftComment]) -> Result<(), CoreError> {
     let json = (!drafts.is_empty())
         .then(|| serde_json::to_vec_pretty(drafts).expect("drafts serialize to JSON"));
-    write_file(path, json)
+    write_file(root, path, json)
 }
 
 /// Writes a temp file and renames it over the old one, so a crash mid-write
 /// can't leave a truncated file. `None` deletes the file. Either way the change
-/// is on disk when this returns, even through a power loss.
-fn write_file(path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
+/// is on disk when this returns, even through a power loss. `path` is under `root`.
+fn write_file(root: &Path, path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
     let storage =
         |e: io::Error| CoreError::Storage(format!("couldn't save {}: {e}", path.display()));
     let dir = path.parent().expect("draft paths have a parent");
     match json {
         Some(json) => {
             let tmp = path.with_extension("json.tmp");
-            create_dirs(dir).map_err(storage)?;
+            create_dirs(root, dir).map_err(storage)?;
             let mut file = fs::File::create(&tmp).map_err(storage)?;
             file.write_all(&json)
                 .and_then(|()| file.sync_all())
@@ -1630,22 +1630,18 @@ fn write_file(path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
         .map_err(storage)
 }
 
-/// Makes `dir` and any missing parents, syncing the parent of each one it makes,
-/// so a new path to the file survives a power loss too.
-fn create_dirs(dir: &Path) -> io::Result<()> {
-    if dir.is_dir() {
-        return Ok(());
+/// Makes `dir` and any missing parents, then syncs the parent of each level from
+/// `root` down, made now or before, so the path to the file survives a power
+/// loss, even if a sync failed on an earlier try.
+fn create_dirs(root: &Path, dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    for level in dir.ancestors().take_while(|level| level.starts_with(root)) {
+        let parent = level
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
     }
-    let parent = dir
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no parent directory"))?;
-    create_dirs(parent)?;
-    if let Err(e) = fs::create_dir(dir)
-        && e.kind() != io::ErrorKind::AlreadyExists
-    {
-        return Err(e);
-    }
-    fs::File::open(parent)?.sync_all()
+    Ok(())
 }
 
 fn position(drafts: &[DraftComment], id: &str) -> Result<usize, CoreError> {
@@ -2688,12 +2684,12 @@ mod tests {
     fn makes_missing_directories_one_by_one() {
         let dir = tempfile::tempdir().unwrap();
         let deep = dir.path().join("drafts/owner/name");
-        create_dirs(&deep).unwrap();
+        create_dirs(dir.path(), &deep).unwrap();
         assert!(deep.is_dir());
         // Already there is fine, and a file in the way isn't.
-        create_dirs(&deep).unwrap();
+        create_dirs(dir.path(), &deep).unwrap();
         fs::write(dir.path().join("file"), "x").unwrap();
-        assert!(create_dirs(&dir.path().join("file/below")).is_err());
+        assert!(create_dirs(dir.path(), &dir.path().join("file/below")).is_err());
     }
 
     #[test]
