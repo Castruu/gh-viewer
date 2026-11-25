@@ -12,7 +12,7 @@ struct DiffList: View {
     let setViewed: (String, Bool) -> Void
     /// Where a shift-click extends from: the last plain click, if it's still an end of the selection.
     @State private var anchor: (path: String, row: Int)?
-    /// Files whose header notes (outdated, latest-push and pending comments) are expanded.
+    /// Files whose header notes (outdated, other-commit and pending comments) are expanded.
     @State private var shownNotes: Set<String> = []
     @State private var escapeMonitor: Any?
 
@@ -21,7 +21,7 @@ struct DiffList: View {
         let pendingReview = opened?.detail.pendingReview
         let annotations = DiffAnnotations(threads: opened?.detail.threads ?? [], drafts: review.drafts,
                                           pending: pendingReview?.comments ?? [],
-                                          threadsInline: opened?.detail.headOid == opened?.checkout.headOid,
+                                          headOid: opened?.checkout.headOid,
                                           pendingInline: pendingReview?.commitOid == opened?.checkout.headOid)
         let viewed = review.viewedPaths
         ScrollViewReader { proxy in
@@ -312,13 +312,11 @@ struct DiffFileNotesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !notes.latestPush.isEmpty {
-                Text(review.hasNewerCommits
-                     ? "These threads refer to lines in the latest push. Your drafts hold the diff on \(review.shortHeadOid); submit or discard them to see the threads in place."
-                     : "These threads refer to lines in a push that landed while the diff loaded. Reload to see them in place.")
+            if !notes.otherCommit.isEmpty {
+                Text(otherCommitNote)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                ForEach(notes.latestPush, id: \.id) { DiffThreadView(thread: $0) }
+                ForEach(notes.otherCommit, id: \.id) { DiffThreadView(thread: $0) }
             }
             ForEach(notes.outdated, id: \.id) { DiffThreadView(thread: $0) }
             ForEach(Array(notes.pending.enumerated()), id: \.offset) { _, comment in
@@ -327,6 +325,17 @@ struct DiffFileNotesView: View {
         }
         .padding(12)
         .frame(maxWidth: 820, alignment: .leading)
+    }
+
+    /// Why these threads' lines aren't this diff's.
+    private var otherCommitNote: String {
+        if review.hasNewerCommits {
+            return "These threads refer to lines on another commit, usually the latest push. Your drafts hold the diff on \(review.shortHeadOid); submit or discard them to see the threads in place."
+        }
+        if review.opened.map({ $0.detail.headOid != $0.checkout.headOid }) ?? false {
+            return "These threads refer to lines in a push that landed while the diff loaded. Reload to see them in place."
+        }
+        return "These threads refer to lines on another commit: GitHub keeps a comment posted on an older commit there until the next push."
     }
 
     /// "Whole file", or the line and the commit the pending review was started on.

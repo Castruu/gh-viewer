@@ -112,18 +112,19 @@ struct DiffAnnotations {
     var pending: [DiffAnchor: [PendingComment]] = [:]
     var notes: [String: DiffFileNotes] = [:]
 
-    /// `threadsInline` is false when the diff isn't on the commit GitHub placed the threads on:
-    /// drafts pin it to an older one, or a push landed while it loaded. `pendingInline` is false
-    /// when the pending review is on another commit.
+    /// `headOid` is the commit the diff shows. A thread goes under its line only when GitHub placed
+    /// it on that commit: drafts may pin the diff to an older one, a push may land while it loads,
+    /// and a thread posted on an older commit stays there until the next push. `pendingInline` is
+    /// false when the pending review is on another commit.
     init(threads: [ReviewThread], drafts: [DraftComment], pending: [PendingComment],
-         threadsInline: Bool, pendingInline: Bool) {
+         headOid: String?, pendingInline: Bool) {
         for thread in threads {
-            if let line = thread.line, threadsInline {
+            if let line = thread.line, thread.commitOid != nil, thread.commitOid == headOid {
                 self.threads[DiffAnchor(path: thread.path, side: thread.side, line: line), default: []].append(thread)
             } else if thread.line == nil {
                 notes[thread.path, default: DiffFileNotes()].outdated.append(thread)
             } else {
-                notes[thread.path, default: DiffFileNotes()].latestPush.append(thread)
+                notes[thread.path, default: DiffFileNotes()].otherCommit.append(thread)
             }
         }
         for draft in drafts {
@@ -155,16 +156,17 @@ struct DiffAnnotations {
 struct DiffFileNotes {
     /// Threads on lines that are no longer in the PR.
     var outdated: [ReviewThread] = []
-    /// Threads placed on another commit than the diff's, usually the latest push while drafts hold an older one.
-    var latestPush: [ReviewThread] = []
+    /// Threads placed on another commit than the diff's: usually the latest push while drafts hold
+    /// an older one, or an older commit a thread was posted on, until the next push moves it.
+    var otherCommit: [ReviewThread] = []
     /// Your pending github.com comments on the whole file, or started on another commit.
     var pending: [PendingComment] = []
 
-    var isEmpty: Bool { outdated.isEmpty && latestPush.isEmpty && pending.isEmpty }
+    var isEmpty: Bool { outdated.isEmpty && otherCommit.isEmpty && pending.isEmpty }
 
-    /// "1 outdated · 2 on latest push · 1 pending"
+    /// "1 outdated · 2 on another commit · 1 pending"
     var summary: String {
-        [(outdated.count, "outdated"), (latestPush.count, "on latest push"), (pending.count, "pending")]
+        [(outdated.count, "outdated"), (otherCommit.count, "on another commit"), (pending.count, "pending")]
             .filter { $0.0 > 0 }
             .map { "\($0.0) \($0.1)" }
             .joined(separator: " · ")

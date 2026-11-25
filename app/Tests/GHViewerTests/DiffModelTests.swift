@@ -16,6 +16,21 @@ struct DiffModelTests {
         #expect(!file.crossesHunks(1...2))
         #expect(file.crossesHunks(1...4))
     }
+
+    @Test func threadsGoUnderALineOnlyOnTheirOwnCommit() {
+        let thread = { (id: String, line: UInt32?, commit: String?) in
+            ReviewThread(id: id, path: "a.swift", line: line, startLine: nil, side: .right, startSide: nil,
+                         isResolved: false, isOutdated: line == nil, commitOid: commit, comments: [])
+        }
+        let threads = [thread("here", 2, "shown"), thread("older", 2, "older"), thread("unknown", 2, nil),
+                       thread("outdated", nil, "shown")]
+        let annotations = DiffAnnotations(threads: threads, drafts: [], pending: [], headOid: "shown",
+                                          pendingInline: true)
+        #expect(annotations.threads[DiffAnchor(path: "a.swift", side: .right, line: 2)]?.map(\.id) == ["here"])
+        #expect(annotations.notes["a.swift"]?.otherCommit.map(\.id) == ["older", "unknown"])
+        #expect(annotations.notes["a.swift"]?.outdated.map(\.id) == ["outdated"])
+        #expect(annotations.notes["a.swift"]?.summary == "1 outdated · 2 on another commit")
+    }
 }
 
 private func hunk(start: UInt32, count: UInt32) -> DiffHunk {

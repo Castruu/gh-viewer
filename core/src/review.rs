@@ -495,10 +495,9 @@ fn count_changes(file: &DiffFile) -> (usize, usize) {
     (added, removed)
 }
 
-/// The PR's threads for `list_review_threads`. Their lines are GitHub's, on its
-/// head; while the checkout is on another commit, each says so.
+/// The PR's threads for `list_review_threads`. Their lines are GitHub's, on the
+/// thread's commit; one on another commit than the checkout's says so.
 fn threads_json(review: &OpenedReview, path: Option<&str>) -> serde_json::Value {
-    let elsewhere = review.detail.head_oid != review.checkout.head_oid;
     let threads = review
         .detail
         .threads
@@ -506,9 +505,9 @@ fn threads_json(review: &OpenedReview, path: Option<&str>) -> serde_json::Value 
         .filter(|thread| path.is_none_or(|path| thread.path == path))
         .map(|thread| {
             let mut json = thread_json(thread);
-            if elsewhere {
-                json["positions_refer_to_latest_push"] = true.into();
-                json["positions_commit"] = review.detail.head_oid.clone().into();
+            if thread.commit_oid.as_ref() != Some(&review.checkout.head_oid) {
+                json["positions_on_another_commit"] = true.into();
+                json["positions_commit"] = thread.commit_oid.clone().into();
             }
             json
         })
@@ -619,9 +618,9 @@ fn build_prompt(review: &OpenedReview, include_pr: bool, selection: Option<&Sele
             selection.path,
             if lines.is_empty() { "(lines not found in the diff)\n".to_string() } else { lines },
         );
-        // Thread lines are GitHub's, on its head. On another commit, such as a pinned one, they'd match the wrong lines.
+        // Thread lines are GitHub's, on the thread's commit. On another one, such as a pinned diff's, they'd match the wrong lines.
         let threads = detail.threads.iter().filter(|t| {
-            detail.head_oid == checkout.head_oid
+            t.commit_oid.as_ref() == Some(&checkout.head_oid)
                 && t.path == selection.path
                 && t.line.is_some_and(|line| keys.contains(&(t.side, line)))
         });
@@ -718,6 +717,7 @@ mod tests {
             start_side: None,
             is_resolved: false,
             is_outdated: false,
+            commit_oid: Some("b".repeat(40)),
             comments: vec![ThreadComment {
                 author: Some("hubot".into()),
                 body: "Why new()?".into(),
@@ -894,20 +894,18 @@ mod tests {
     #[test]
     fn thread_positions_say_which_commit_they_refer_to() {
         let mut review = review();
-        assert_eq!(threads_json(&review, None)[0].get("positions_refer_to_latest_push"), None);
+        assert_eq!(threads_json(&review, None)[0].get("positions_on_another_commit"), None);
         assert_eq!(threads_json(&review, Some("other.rs")), serde_json::json!([]));
         // Drafts hold the checkout on an older commit than GitHub's head.
         review.checkout.head_oid = "d".repeat(40);
         let threads = threads_json(&review, Some("src/a.rs"));
-        assert_eq!(threads[0]["positions_refer_to_latest_push"], true);
+        assert_eq!(threads[0]["positions_on_another_commit"], true);
         assert_eq!(threads[0]["positions_commit"], "b".repeat(40));
     }
 
     #[test]
-    fn pinned_diffs_get_no_threads_by_line() {
+    fn threads_by_line_only_on_their_own_commit() {
         let mut review = review();
-        // Drafts hold the diff on an older commit; GitHub's thread lines are on its head.
-        review.checkout.head_oid = "d".repeat(40);
         let selection = Selection {
             path: "src/a.rs".into(),
             start_line: 11,
@@ -915,8 +913,14 @@ mod tests {
             line: 11,
             side: DiffSide::Right,
         };
+        assert!(build_prompt(&review, false, Some(&selection), "Ok?").contains("hubot"));
+        // Drafts hold the diff on an older commit; the thread's lines are on GitHub's head.
+        review.checkout.head_oid = "d".repeat(40);
         let prompt = build_prompt(&review, false, Some(&selection), "Ok?");
         assert!(!prompt.contains("hubot"), "{prompt}");
+        // A thread posted on that older commit keeps its lines until the next push.
+        review.detail.threads[0].commit_oid = Some("d".repeat(40));
+        assert!(build_prompt(&review, false, Some(&selection), "Ok?").contains("hubot"));
     }
 
     #[test]

@@ -34,7 +34,7 @@ query($owner: String!, $name: String!, $number: Int!,
         pageInfo { hasNextPage endCursor }
         nodes {
           id path line startLine diffSide startDiffSide isResolved isOutdated
-          comments(first: 100) { nodes { author { login } body createdAt url state } }
+          comments(first: 100) { nodes { author { login } body createdAt url state commit { oid } } }
         }
       }
     }
@@ -132,7 +132,8 @@ pub struct PullRequestDetail {
     pub is_draft: bool,
     pub base_ref_name: String,
     pub head_ref_name: String,
-    /// GitHub's head commit when this was fetched. Thread lines refer to it.
+    /// GitHub's head commit when this was fetched. Thread lines usually refer to
+    /// it; each thread's `commit_oid` says.
     pub head_oid: String,
     pub files: Vec<ChangedFile>,
     pub threads: Vec<ReviewThread>,
@@ -195,6 +196,10 @@ pub struct ReviewThread {
     pub start_side: Option<DiffSide>,
     pub is_resolved: bool,
     pub is_outdated: bool,
+    /// The commit `line` and `start_line` refer to. Usually the PR's head, but a
+    /// thread posted on an older commit stays on it until GitHub moves it, at the
+    /// next push. `None` if GitHub doesn't say.
+    pub commit_oid: Option<String>,
     pub comments: Vec<ThreadComment>,
 }
 
@@ -1328,6 +1333,10 @@ fn convert_thread(node: ThreadNode) -> Result<Option<ReviewThread>, CoreError> {
     if had_comments && nodes.is_empty() {
         return Ok(None);
     }
+    let commit_oid = nodes
+        .first()
+        .and_then(|comment| comment.commit.as_ref())
+        .map(|commit| commit.oid.clone());
     let comments = nodes
         .into_iter()
         .map(|comment| {
@@ -1351,6 +1360,7 @@ fn convert_thread(node: ThreadNode) -> Result<Option<ReviewThread>, CoreError> {
         start_side: node.start_diff_side,
         is_resolved: node.is_resolved,
         is_outdated: node.is_outdated,
+        commit_oid,
         comments,
     }))
 }
@@ -1452,6 +1462,8 @@ struct CommentNode {
     url: String,
     /// PENDING or SUBMITTED. Kept as a string so a new state doesn't break parsing.
     state: String,
+    #[serde(default)]
+    commit: Option<CommitOid>,
 }
 
 // --- Drafts ---------------------------------------------------------------------
@@ -1863,7 +1875,8 @@ mod tests {
               "diffSide": "RIGHT", "startDiffSide": "LEFT", "isResolved": false, "isOutdated": false,
               "comments": { "nodes": [
                 { "author": null, "body": "Can this be one function?", "state": "SUBMITTED",
-                  "createdAt": "2026-11-05T09:00:00Z", "url": "https://github.com/o/r/pull/42#discussion_r2" },
+                  "createdAt": "2026-11-05T09:00:00Z", "url": "https://github.com/o/r/pull/42#discussion_r2",
+                  "commit": { "oid": "6dcb09b5b57875f334f61aebed695e2e4193db5e" } },
                 { "author": { "login": "hubot" }, "body": "Done.", "state": "SUBMITTED",
                   "createdAt": "2026-11-05T10:30:00Z", "url": "https://github.com/o/r/pull/42#discussion_r3" },
                 { "author": { "login": "me" }, "body": "Split this up?", "state": "PENDING",
@@ -2015,6 +2028,7 @@ mod tests {
             (None, None, None)
         );
         assert!(outdated.is_outdated && outdated.is_resolved);
+        assert_eq!(outdated.commit_oid, None);
         assert_eq!(outdated.comments[0].author.as_deref(), Some("octocat"));
         assert_eq!(
             outdated.comments[0].created_at,
@@ -2028,6 +2042,10 @@ mod tests {
             (Some(DiffSide::Left), DiffSide::Right)
         );
         assert!(!multi.is_outdated && !multi.is_resolved);
+        assert_eq!(
+            multi.commit_oid.as_deref(),
+            Some("6dcb09b5b57875f334f61aebed695e2e4193db5e")
+        );
         // The viewer's pending reply is left out.
         let authors: Vec<_> = multi.comments.iter().map(|c| c.author.as_deref()).collect();
         assert_eq!(authors, [None, Some("hubot")]);
