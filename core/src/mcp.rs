@@ -14,13 +14,18 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{AUTHORIZATION, HeaderValue, WWW_AUTHENTICATE};
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::{CoreError, DiffSide, runtime};
+
+/// Tool calls are quick local requests. These limits stop clients that never
+/// send one, before authentication, from holding the app's file descriptors.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONNECTIONS: usize = 64;
 
 /// What one agent session's tools can see and do, for one PR.
 pub(crate) trait ReviewTools: Send + Sync + 'static {
@@ -159,7 +164,10 @@ impl McpServer {
     }
 
     async fn serve(self: Arc<Self>, listener: tokio::net::TcpListener) {
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         loop {
+            // At the cap, new connections wait in the kernel's backlog, not in our descriptors.
+            let slot = slots.clone().acquire_owned().await.expect("the semaphore is never closed");
             let stream = match listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(_) => {
@@ -170,12 +178,16 @@ impl McpServer {
             };
             let server = self.clone();
             tokio::spawn(async move {
+                let _slot = slot;
                 let service = hyper::service::service_fn(move |request| {
                     let server = server.clone();
                     async move { Ok::<_, Infallible>(server.handle(request).await) }
                 });
                 // An error here means the client hung up; there's no one to tell.
                 let _ = hyper::server::conn::http1::Builder::new()
+                    .timer(TokioTimer::new())
+                    // Also applies between requests, so an idle keep-alive connection closes too.
+                    .header_read_timeout(HEADER_READ_TIMEOUT)
                     .serve_connection(TokioIo::new(stream), service)
                     .await;
             });
@@ -504,6 +516,20 @@ mod tests {
             status(post(&other, &ping).bearer_auth(&other.bearer_token)).await,
             200
         );
+    }
+
+    #[tokio::test]
+    async fn closes_connections_that_never_send_a_request() {
+        use std::io::Read;
+        let (_server, _tools, endpoint) = serve_fake().await;
+        let address = endpoint.url["http://".len()..].split('/').next().unwrap();
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(HEADER_READ_TIMEOUT + Duration::from_secs(5)))
+            .unwrap();
+        // Blocking is fine: the server runs on crate::runtime(), not this test's runtime.
+        let closed = socket.read_to_end(&mut Vec::new());
+        assert!(closed.is_ok(), "the server didn't hang up: {closed:?}");
     }
 
     #[test]
