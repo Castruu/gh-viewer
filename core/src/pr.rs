@@ -22,7 +22,7 @@ query($owner: String!, $name: String!, $number: Int!,
       $withFiles: Boolean!, $filesAfter: String, $withThreads: Boolean!, $threadsAfter: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      id title body url isDraft baseRefName headRefName headRefOid
+      id title body url isDraft viewerDidAuthor baseRefName headRefName headRefOid
       author { login }
       ...pendingReviews
       # GitHub caps this connection at 3000 files.
@@ -74,6 +74,12 @@ mutation($input: SubmitPullRequestReviewInput!) {
 }
 "#;
 
+const DELETE_REVIEW: &str = r#"
+mutation($input: DeletePullRequestReviewInput!) {
+  deletePullRequestReview(input: $input) { clientMutationId }
+}
+"#;
+
 const MARK_VIEWED: &str = r#"
 mutation($input: MarkFileAsViewedInput!) { markFileAsViewed(input: $input) { clientMutationId } }
 "#;
@@ -115,6 +121,8 @@ pub struct PullRequestDetail {
     pub url: String,
     /// `None` when the author's account was deleted.
     pub author: Option<String>,
+    /// You opened this PR, so GitHub refuses your approvals and change requests on it.
+    pub viewer_did_author: bool,
     pub is_draft: bool,
     pub base_ref_name: String,
     pub head_ref_name: String,
@@ -301,6 +309,10 @@ pub(crate) struct Submission {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SubmitAttempt {
     pub review_id: String,
+    /// This attempt started the review, rather than adding to yours from github.com,
+    /// so it deletes the review if GitHub refuses to submit it.
+    #[serde(default)]
+    pub created: bool,
     pub commit_oid: String,
     pub event: ReviewEvent,
     pub body: String,
@@ -353,9 +365,19 @@ impl GitHubClient {
         };
         // Recorded before the last step: if its answer is lost, a retry finds the review submitted.
         store.save_attempt(repo, number, Some(&attempt))?;
-        let url = self
-            .submit_pending_review(&attempt.review_id, attempt.event, &attempt.body)
-            .await?;
+        let variables = submit_pending_variables(&attempt.review_id, attempt.event, &attempt.body);
+        let url = match submit_outcome(self.graphql(SUBMIT_PENDING, variables).await) {
+            Outcome::Posted(url) => url,
+            Outcome::Unknown(error) => {
+                return Err(CoreError::Api(format!(
+                    "GitHub may or may not have submitted your review ({error}). Retrying is \
+                     safe: it won't post the review twice."
+                )));
+            }
+            Outcome::Refused(error) => {
+                return Err(self.refused(store, repo, number, &attempt, error).await);
+            }
+        };
         store
             .finish_attempt(repo, number, &attempt)
             .map_err(|error| posted_but(&url, error))?;
@@ -371,6 +393,7 @@ impl GitHubClient {
                 .graphql(&lookup, json!({ "id": submission.pull_request_id }))
                 .await?,
         )?;
+        let created = pending.is_none();
         let review_id = match pending {
             Some(pending) => {
                 check_pending_commit(&pending, &submission.commit_oid)?;
@@ -393,6 +416,7 @@ impl GitHubClient {
         };
         Ok(SubmitAttempt {
             review_id,
+            created,
             commit_oid: submission.commit_oid.clone(),
             event: submission.event,
             body: submission.body.clone(),
@@ -418,6 +442,7 @@ impl GitHubClient {
         }
         Ok(SubmitAttempt {
             review_id: review.id,
+            created: attempt.created,
             commit_oid: submission.commit_oid.clone(),
             event: submission.event,
             body: submission.body.clone(),
@@ -464,23 +489,68 @@ impl GitHubClient {
         )
     }
 
-    /// Phase 2 of a submit: submits the pending review; returns its URL.
-    async fn submit_pending_review(
+    /// GitHub refused the final submit, e.g. an approval of your own PR. A
+    /// review this attempt started is deleted, so its comments aren't left on
+    /// GitHub to show twice or go out later in another form.
+    async fn refused(
         &self,
-        review_id: &str,
-        event: ReviewEvent,
-        body: &str,
-    ) -> Result<String, CoreError> {
-        self.graphql(SUBMIT_PENDING, submit_pending_variables(review_id, event, body))
+        store: &DraftStore,
+        repo: &str,
+        number: u64,
+        attempt: &SubmitAttempt,
+        error: CoreError,
+    ) -> CoreError {
+        if !attempt.created {
+            return CoreError::Api(format!(
+                "GitHub refused the review ({error}). Your drafts are in your pending review on \
+                 github.com; submitting again continues it."
+            ));
+        }
+        let variables = json!({ "input": { "pullRequestReviewId": attempt.review_id } });
+        let deleted = self
+            .graphql(DELETE_REVIEW, variables)
             .await
-            .and_then(|response| parse_mutation(&response))
-            .and_then(|data| review_url(&data, "/submitPullRequestReview/pullRequestReview/url"))
-            .map_err(|error| {
-                CoreError::Api(format!(
-                    "your comments are in a pending review on GitHub, but submitting it failed: {error}. \
-                     Retrying is safe: it won't post the review twice."
-                ))
-            })
+            .and_then(|response| parse_mutation(&response));
+        if let Err(delete) = deleted {
+            return CoreError::Api(format!(
+                "GitHub refused the review ({error}), and its pending copy couldn't be deleted \
+                 ({delete}). Submitting again continues it."
+            ));
+        }
+        match store.save_attempt(repo, number, None) {
+            Ok(()) => CoreError::Api(format!(
+                "GitHub refused the review, so nothing was posted ({error}). Your drafts are still here."
+            )),
+            Err(forget) => forget,
+        }
+    }
+}
+
+/// How GitHub answered the final submit.
+#[derive(Debug)]
+enum Outcome {
+    Posted(String),
+    /// GraphQL errors: GitHub refused it, and the review is still pending.
+    Refused(CoreError),
+    /// No answer, or one that can't be read: it may have gone through.
+    Unknown(CoreError),
+}
+
+fn submit_outcome(response: Result<String, CoreError>) -> Outcome {
+    let body = match response {
+        Ok(body) => body,
+        Err(error) => return Outcome::Unknown(error),
+    };
+    let (data, messages) = match split_response(&body) {
+        Ok(parts) => parts,
+        Err(error) => return Outcome::Unknown(error),
+    };
+    if !messages.is_empty() {
+        return Outcome::Refused(api_error(messages));
+    }
+    match review_url(&data, "/submitPullRequestReview/pullRequestReview/url") {
+        Ok(url) => Outcome::Posted(url),
+        Err(error) => Outcome::Unknown(error),
     }
 }
 
@@ -771,6 +841,7 @@ fn parse_pr_page(body: &str, repo: &str, number: u64) -> Result<PrPage, CoreErro
             url: node.url,
             author: node.author.map(|author| author.login),
             is_draft: node.is_draft,
+            viewer_did_author: node.viewer_did_author,
             base_ref_name: node.base_ref_name,
             head_ref_name: node.head_ref_name,
             head_oid: node.head_ref_oid,
@@ -889,6 +960,7 @@ struct PrNode {
     body: String,
     url: String,
     is_draft: bool,
+    viewer_did_author: bool,
     base_ref_name: String,
     head_ref_name: String,
     head_ref_oid: String,
@@ -1082,6 +1154,15 @@ impl DraftStore {
             drafts.remove(position(drafts, &id)?);
             Ok(())
         })
+    }
+
+    /// Ids of drafts already in your pending review on GitHub, from a submit that
+    /// hasn't been settled yet. Editing them here wouldn't change what's posted.
+    pub fn in_review(&self, repo: String, number: u64) -> Result<Vec<String>, CoreError> {
+        Ok(self
+            .attempt(&repo, number)?
+            .map(|attempt| attempt.drafts.into_iter().map(|draft| draft.id).collect())
+            .unwrap_or_default())
     }
 
     /// Deletes the PR's drafts and the record of an unfinished submit. A pending
@@ -1306,7 +1387,7 @@ mod tests {
     const PR_RESPONSE: &str = r#"{
       "data": { "repository": { "pullRequest": {
         "id": "PR_kwDOAbc123", "title": "Add review window", "body": "Closes #4.",
-        "url": "https://github.com/o/r/pull/42", "isDraft": false,
+        "url": "https://github.com/o/r/pull/42", "isDraft": false, "viewerDidAuthor": false,
         "baseRefName": "main", "headRefName": "feat/review",
         "headRefOid": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
         "author": null,
@@ -1524,7 +1605,7 @@ mod tests {
     #[test]
     fn later_pages_may_skip_a_connection() {
         let body = r#"{ "data": { "repository": { "pullRequest": {
-          "id": "PR_1", "title": "t", "body": "", "url": "u", "isDraft": true,
+          "id": "PR_1", "title": "t", "body": "", "url": "u", "isDraft": true, "viewerDidAuthor": true,
           "baseRefName": "main", "headRefName": "h", "headRefOid": "abc", "author": { "login": "me" },
           "reviewThreads": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] }
         } } } }"#;
@@ -1646,6 +1727,7 @@ mod tests {
         let sent = draft("1", None);
         let earlier = SubmitAttempt {
             review_id: "PRR_1".into(),
+            created: true,
             commit_oid: "abc".into(),
             event: ReviewEvent::Approve,
             body: "LGTM".into(),
@@ -1687,6 +1769,43 @@ mod tests {
             ]
         );
         assert_eq!(posted_as("APPROVED"), "an approval");
+    }
+
+    #[test]
+    fn tells_a_refused_submit_from_one_that_may_have_gone_through() {
+        let posted = r#"{ "data": { "submitPullRequestReview": { "pullRequestReview": { "url": "https://github.com/o/r/pull/7#pullrequestreview-9" } } } }"#;
+        assert!(
+            matches!(submit_outcome(Ok(posted.into())), Outcome::Posted(url) if url.ends_with("-9"))
+        );
+        let refused = r#"{ "data": { "submitPullRequestReview": null },
+          "errors": [ { "message": "Can not approve your own pull request" } ] }"#;
+        assert!(
+            matches!(submit_outcome(Ok(refused.into())), Outcome::Refused(error) if error.to_string().contains("own pull request"))
+        );
+        // A timeout or a 502 may have reached GitHub, and so may a reply that can't be read.
+        let timeout = Err(CoreError::Network("operation timed out".into()));
+        assert!(matches!(submit_outcome(timeout), Outcome::Unknown(_)));
+        assert!(matches!(
+            submit_outcome(Ok("<html>".into())),
+            Outcome::Unknown(_)
+        ));
+        assert!(matches!(
+            submit_outcome(Ok(r#"{ "data": {} }"#.into())),
+            Outcome::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn lists_the_drafts_already_in_a_pending_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let sent = store.add("o/r".into(), 7, new_draft("sent")).unwrap();
+        store.add("o/r".into(), 7, new_draft("late")).unwrap();
+        assert!(store.in_review("o/r".into(), 7).unwrap().is_empty());
+        store
+            .save_attempt("o/r", 7, Some(&attempt(vec![sent.clone()])))
+            .unwrap();
+        assert_eq!(store.in_review("o/r".into(), 7).unwrap(), [sent.id]);
     }
 
     #[test]
@@ -2020,6 +2139,7 @@ mod tests {
     fn attempt(drafts: Vec<DraftComment>) -> SubmitAttempt {
         SubmitAttempt {
             review_id: "PRR_1".into(),
+            created: true,
             commit_oid: "c0ffee0123456789".into(),
             event: ReviewEvent::Approve,
             body: "LGTM".into(),

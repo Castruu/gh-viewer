@@ -18,12 +18,12 @@ struct SubmitReviewSheet: View {
 
             Picker("Event", selection: $event) {
                 Text("Comment").tag(ReviewEvent.comment)
-                Text("Approve").tag(ReviewEvent.approve)
-                Text("Request Changes").tag(ReviewEvent.requestChanges)
+                Text("Approve").tag(ReviewEvent.approve).disabled(isOwnPullRequest)
+                Text("Request Changes").tag(ReviewEvent.requestChanges).disabled(isOwnPullRequest)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .help("Comment without a verdict, approve, or request changes")
+            .help(isOwnPullRequest ? Self.ownPullRequestHelp : "Comment without a verdict, approve, or request changes")
 
             TextEditor(text: $message)
                 .font(.body)
@@ -71,8 +71,9 @@ struct SubmitReviewSheet: View {
                     .help("Close without submitting; your drafts stay")
                 Button("Submit Review") { send() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(review.isSubmitting || isEmpty)
-                    .help(isEmpty ? "Write a summary or add comments first" : "Send this review to GitHub")
+                    .disabled(review.isSubmitting || isEmpty || isRefusedVerdict)
+                    .help(isRefusedVerdict ? Self.ownPullRequestHelp
+                          : isEmpty ? "Write a summary or add comments first" : "Send this review to GitHub")
             }
         }
         .font(.callout)
@@ -83,6 +84,17 @@ struct SubmitReviewSheet: View {
             review.actionError = nil
             confirmed = review.drafts
         }
+    }
+
+    private static let ownPullRequestHelp = "You opened this pull request, so GitHub only takes comments from you on it"
+
+    private var isOwnPullRequest: Bool {
+        review.opened?.detail.viewerDidAuthor ?? false
+    }
+
+    /// GitHub refuses an approval or change request from the PR's author.
+    private var isRefusedVerdict: Bool {
+        isOwnPullRequest && event != .comment
     }
 
     /// GitHub only accepts an approval without a body or comments.

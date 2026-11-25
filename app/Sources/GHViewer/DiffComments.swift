@@ -29,6 +29,7 @@ struct DiffLineComments: View {
                     }
                 } else {
                     DiffDraftCard(draft: draft, canEdit: editor == nil,
+                                  isInReview: review.draftsInReview.contains(draft.id),
                                   edit: { editor = .draft(id: draft.id) },
                                   delete: { review.removeDraft(id: draft.id) })
                 }
@@ -170,6 +171,8 @@ struct DiffDraftCard: View {
     let draft: DraftComment
     /// False while another editor is open, so its text isn't lost.
     let canEdit: Bool
+    /// Already in your pending review on GitHub: changing it here wouldn't change what's posted.
+    let isInReview: Bool
     let edit: () -> Void
     let delete: () -> Void
     @Environment(\.palette) private var palette
@@ -199,10 +202,11 @@ struct DiffDraftCard: View {
                     }
                     Spacer(minLength: 0)
                     Button("Edit", action: edit)
-                        .disabled(!canEdit)
-                        .help(canEdit ? "Edit this draft" : "Finish the open comment first")
+                        .disabled(!canEdit || isInReview)
+                        .help(isInReview ? Self.inReviewHelp : canEdit ? "Edit this draft" : "Finish the open comment first")
                     Button("Delete") { isConfirmingDelete = true }
-                        .help("Delete this draft")
+                        .disabled(isInReview)
+                        .help(isInReview ? Self.inReviewHelp : "Delete this draft")
                 }
                 .font(.callout)
                 .buttonStyle(.link)
@@ -215,6 +219,8 @@ struct DiffDraftCard: View {
             Text("It hasn't been submitted, so it can't be recovered.")
         }
     }
+
+    private static let inReviewHelp = "Already in your pending review on GitHub; submit the review to send it"
 
     private var agentName: String? {
         if case .agent(let name) = draft.author { name } else { nil }

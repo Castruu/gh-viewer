@@ -635,6 +635,7 @@ mod tests {
                 body: "Replaces old() with new().".into(),
                 url: "https://github.com/o/r/pull/7".into(),
                 author: Some("octocat".into()),
+                viewer_did_author: false,
                 is_draft: false,
                 base_ref_name: "main".into(),
                 head_ref_name: "swap".into(),

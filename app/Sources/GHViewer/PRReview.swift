@@ -22,6 +22,8 @@ final class PRReview {
     /// The last successful load. Kept while reloading or after a failed reload.
     private(set) var opened: OpenedReview?
     private(set) var drafts: [DraftComment] = []
+    /// Ids of drafts already in your pending review on GitHub from an unsettled submit; they can't change here.
+    private(set) var draftsInReview: Set<String> = []
     /// Set when an action fails (viewed toggle, draft edit, submit); shown by the views.
     var actionError: String?
     /// The diff lines the user selected. Questions to the agent include them.
@@ -77,6 +79,7 @@ final class PRReview {
     func reloadDrafts() {
         do {
             drafts = try store.drafts.list(repo: repo, number: number)
+            draftsInReview = Set(try store.drafts.inReview(repo: repo, number: number))
         } catch {
             actionError = error.coreMessage
         }
