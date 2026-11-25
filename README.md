@@ -90,6 +90,16 @@ or opening `app/` in an editor.
 ```sh
 cargo test -p ghv_core                    # unit and local integration tests
 cargo test -p ghv_core -- --ignored       # live: GitHub (read-only) and your Claude/Codex logins
+swift test --package-path app             # app logic; run scripts/build.sh first
+```
+
+With only the Command Line Tools installed (no Xcode), swift-testing sits outside
+SwiftPM's search paths, so pass them to `swift test`:
+
+```sh
+T=/Library/Developer/CommandLineTools/Library/Developer
+swift test --package-path app -Xswiftc -F$T/Frameworks \
+    -Xlinker -rpath -Xlinker $T/Frameworks -Xlinker -rpath -Xlinker $T/usr/lib
 ```
 
 ## License

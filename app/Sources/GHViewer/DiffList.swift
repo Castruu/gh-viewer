@@ -113,15 +113,18 @@ struct DiffList: View {
         return DiffRowComments(threads: threads, pending: pending, drafts: drafts, composing: composing, editor: editor)
     }
 
+    /// A shift-click extends the selection within its hunk; across a hunk header it starts a new one.
     private func select(_ row: Int, in file: DiffFileModel) {
         if NSEvent.modifierFlags.contains(.shift), let current = file.rowRange(of: review.selection) {
             let from = anchor.flatMap { $0.path == file.id && ($0.row == current.lowerBound || $0.row == current.upperBound) ? $0.row : nil }
                 ?? current.lowerBound
-            review.selection = file.selection(from: min(from, row), to: max(from, row))
-        } else {
-            anchor = (file.id, row)
-            review.selection = file.selection(from: row, to: row)
+            if let extended = file.selection(from: min(from, row), to: max(from, row)) {
+                review.selection = extended
+                return
+            }
         }
+        anchor = (file.id, row)
+        review.selection = file.selection(from: row, to: row)
     }
 }
 

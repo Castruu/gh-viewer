@@ -635,18 +635,25 @@ fn parse_hunk_header(line: &str) -> Option<DiffHunk> {
 /// Whether GitHub would accept a review comment on `line` of `path` on `side`.
 /// The line has to be inside a hunk on that side: Left takes old line numbers
 /// of removed or context lines, Right takes new line numbers of added or context lines.
-#[allow(dead_code)] // first used by mcp.rs
 pub(crate) fn is_commentable(files: &[DiffFile], path: &str, side: DiffSide, line: u32) -> bool {
+    hunk_of(files, path, side, line).is_some()
+}
+
+/// The index of the hunk holding a commentable line. GitHub takes a
+/// multi-line comment only within one hunk.
+pub(crate) fn hunk_of(files: &[DiffFile], path: &str, side: DiffSide, line: u32) -> Option<usize> {
     // Added lines have no old number and removed lines no new one, so the number alone decides.
     files
         .iter()
         .filter(|file| file.path == path)
-        .flat_map(|file| &file.hunks)
-        .flat_map(|hunk| &hunk.lines)
-        .any(|l| match side {
-            DiffSide::Left => l.old_line == Some(line),
-            DiffSide::Right => l.new_line == Some(line),
+        .flat_map(|file| file.hunks.iter().enumerate())
+        .find(|(_, hunk)| {
+            hunk.lines.iter().any(|l| match side {
+                DiffSide::Left => l.old_line == Some(line),
+                DiffSide::Right => l.new_line == Some(line),
+            })
         })
+        .map(|(index, _)| index)
 }
 
 #[cfg(test)]

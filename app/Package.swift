@@ -21,6 +21,8 @@ let package = Package(
                 .linkedFramework("SystemConfiguration"),
             ]
         ),
+        // `swift test --package-path app` after scripts/build.sh; see the README for Command Line Tools.
+        .testTarget(name: "GHViewerTests", dependencies: ["GHViewer"]),
     ],
     // The generated bindings aren't written for Swift 6 strict concurrency.
     swiftLanguageModes: [.v5]

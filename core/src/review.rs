@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, MCP_SERVER_NAME};
-use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, is_commentable};
+use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
 use crate::pr::{DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread};
 use crate::{CoreError, DiffSide, GitHubClient};
@@ -376,6 +376,12 @@ fn validate_draft(files: &[DiffFile], args: &DraftCommentArgs) -> Result<(), Str
             if start_side == args.side && start >= args.line {
                 return Err("start_line must be before line. For a single line, omit start_line and start_side.".into());
             }
+            if hunk_of(files, &args.path, start_side, start) != hunk_of(files, &args.path, args.side, args.line) {
+                return Err(format!(
+                    "start_line {start} and line {} of `{}` are in different hunks. GitHub only takes a multi-line comment within one hunk, so narrow the range or comment on each hunk separately.",
+                    args.line, args.path
+                ));
+            }
             Ok(())
         }
         _ => Err("Pass start_line and start_side together, or neither.".into()),
@@ -663,6 +669,23 @@ mod tests {
         let mut empty = args(12, DiffSide::Right, None);
         empty.body = "  ".into();
         assert!(validate_draft(&files, &empty).is_err());
+    }
+
+    #[test]
+    fn rejects_multi_line_drafts_across_hunks() {
+        let mut files = review().files;
+        files[0].hunks.push(DiffHunk {
+            header: "@@ -30 +31 @@".into(),
+            old_start: 30,
+            old_count: 1,
+            new_start: 31,
+            new_count: 1,
+            lines: vec![line(LineKind::Context, Some(30), Some(31), "x();")],
+        });
+        let error = validate_draft(&files, &args(31, DiffSide::Right, Some((12, DiffSide::Right)))).unwrap_err();
+        assert!(error.contains("different hunks"), "{error}");
+        assert!(validate_draft(&files, &args(31, DiffSide::Right, Some((11, DiffSide::Left)))).is_err());
+        assert!(validate_draft(&files, &args(12, DiffSide::Right, Some((10, DiffSide::Right)))).is_ok());
     }
 
     #[test]
