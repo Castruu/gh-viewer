@@ -67,7 +67,8 @@ private struct ChatHeader: View {
                 }
                 .font(.callout)
                 .foregroundStyle(palette.agent)
-                .help(chat.isStarting ? "The first start downloads the agent and can take a minute" : "The agent is working on your question")
+                .help(chat.isStarting ? "The first start downloads the agent and can take a minute"
+                                      : "The agent is working on your question")
             }
         }
         .padding(.horizontal, 12)
