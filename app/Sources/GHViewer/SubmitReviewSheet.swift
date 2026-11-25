@@ -97,7 +97,8 @@ struct SubmitReviewSheet: View {
     }
 }
 
-/// The drafts that go out with the review, grouped by file.
+/// The drafts that go out with the review: yours, then each agent's, so it's clear who wrote
+/// what you're about to post (decision 5c). Each group is listed by file.
 private struct SubmitDraftSummary: View {
     let drafts: [DraftComment]
     @Environment(\.palette) private var palette
@@ -107,27 +108,46 @@ private struct SubmitDraftSummary: View {
             Text("No draft comments. The review is submitted with the summary only.")
                 .foregroundStyle(.secondary)
         } else {
-            let byFile = Dictionary(grouping: drafts, by: \.path).sorted { $0.key < $1.key }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(countLabel(drafts.count, "comment")).font(.headline)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(byFile, id: \.key) { path, drafts in
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(verbatim: path).fontWeight(.semibold).lineLimit(1).truncationMode(.head)
-                                ForEach(drafts, id: \.id) { draft in
-                                    row(draft)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(groups, id: \.agent) { agent, drafts in
+                        VStack(alignment: .leading, spacing: 6) {
+                            header(agent: agent, count: drafts.count)
+                            ForEach(Dictionary(grouping: drafts, by: \.path).sorted { $0.key < $1.key }, id: \.key) { path, drafts in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(verbatim: path).fontWeight(.semibold).lineLimit(1).truncationMode(.head)
+                                    ForEach(drafts, id: \.id) { row($0) }
                                 }
                             }
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
                 }
-                .frame(maxHeight: 180)
-                .fixedSize(horizontal: false, vertical: true)
-                .background(.background.secondary, in: RoundedRectangle(cornerRadius: 5))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
             }
+            .frame(maxHeight: 220)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 5))
+        }
+    }
+
+    /// Your drafts first (`agent` nil), then each agent's by name.
+    private var groups: [(agent: String?, drafts: [DraftComment])] {
+        Dictionary(grouping: drafts) { draft -> String? in
+            if case .agent(let name) = draft.author { name } else { nil }
+        }
+        .sorted { ($0.key ?? "") < ($1.key ?? "") }
+        .map { ($0.key, $0.value) }
+    }
+
+    @ViewBuilder
+    private func header(agent: String?, count: Int) -> some View {
+        if let agent {
+            Label("Drafted by \(agent) (\(count))", systemImage: "sparkles")
+                .font(.headline)
+                .foregroundStyle(palette.agent)
+        } else {
+            Text("Your comments (\(count))").font(.headline)
         }
     }
 
@@ -143,11 +163,6 @@ private struct SubmitDraftSummary: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 52, alignment: .leading)
-            if case .agent(let name) = draft.author {
-                Label(name, systemImage: "sparkles")
-                    .foregroundStyle(palette.agent)
-                    .help("Drafted by \(name)")
-            }
             Text(verbatim: DiffMarkdown.firstLine(of: draft.body))
                 .lineLimit(1)
         }
