@@ -841,7 +841,7 @@ fn launch_adapter(
     stderr: Stderr,
 ) -> BoxFuture<'static, Result<DynConnectTo<Client>, CoreError>> {
     Box::pin(async move {
-        let env = login_env().await;
+        let mut env = login_env().await;
         let npx = env
             .get("PATH")
             .and_then(|path| std::env::split_paths(path).map(|dir| dir.join("npx")).find(|npx| npx.is_file()))
@@ -852,7 +852,6 @@ fn launch_adapter(
             })?;
         // AcpAgent runs the adapter in its own process group and kills the
         // group on drop, so the node process behind npx doesn't outlive us.
-        let mut env = env.clone();
         // Set when the app was started from inside a Claude Code session; Claude Code reads it as "nested".
         env.remove("CLAUDECODE");
         let config = AcpAgentConfig::new(npx)
@@ -876,17 +875,17 @@ fn launch_adapter(
     })
 }
 
-/// The user's login shell environment, read once. Apps launched from Finder
-/// get a minimal PATH, and agents need the user's own to find npx, node,
-/// cargo and the like. Falls back to this process's environment.
-async fn login_env() -> &'static HashMap<String, String> {
+/// The user's login shell environment. Apps launched from Finder get a
+/// minimal PATH, and agents need the user's own to find npx, node, cargo and
+/// the like. Only a successful read is kept: if the shell fails or is slow,
+/// this falls back to this process's environment, and the next agent start
+/// asks the shell again.
+async fn login_env() -> HashMap<String, String> {
     static ENV: tokio::sync::OnceCell<HashMap<String, String>> = tokio::sync::OnceCell::const_new();
-    ENV.get_or_init(async || {
-        shell_env()
-            .await
-            .unwrap_or_else(|| std::env::vars().collect())
-    })
-    .await
+    match ENV.get_or_try_init(async || shell_env().await.ok_or(())).await {
+        Ok(env) => env.clone(),
+        Err(()) => std::env::vars().collect(),
+    }
 }
 
 /// Runs `$SHELL` as an interactive login shell, as VS Code does, so it reads

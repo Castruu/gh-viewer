@@ -123,7 +123,7 @@ written to the agent's config.
 - Codex: `npx -y @agentclientprotocol/codex-acp`
 
 Apps launched from Finder get a minimal PATH, so the core reads the user's
-login shell environment once (`$SHELL -l -c 'env -0'`). It uses that
+login shell environment (`$SHELL -l -c 'env -0'`), keeping the first read that works. It uses that
 environment for every agent process, which lets `npx`, `node`, `cargo` and
 friends resolve as they do in a terminal. One adapter process runs per agent
 kind, with one ACP session per PR. The app tells the agent it offers no
