@@ -190,11 +190,13 @@ final class PRReview {
         isCancelPending = false
         defer {
             chat.isRunning = false
+            chat.runningSession = nil
             isCancelPending = false
             saveChat()
         }
         do {
             let sessionId = try await session(for: kind)
+            chat.runningSession = sessionId
             if isCancelPending {
                 chat.append(.stopped)
                 return

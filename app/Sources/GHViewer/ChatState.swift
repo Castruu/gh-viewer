@@ -9,6 +9,8 @@ struct ChatState {
     private(set) var items: [ChatItem] = []
     /// True from sending a question until the agent's turn ends.
     var isRunning = false
+    /// The session the running turn is on, once it has one.
+    var runningSession: String?
     /// True while the agent process and session start; the first `npx` run can take a while.
     var isStarting = false
 
@@ -59,7 +61,10 @@ struct ChatState {
             if let kind = sessions.first(where: { $0.value == sessionId })?.key {
                 sessions[kind] = nil
             }
-            isRunning = false
+            // The other agent's session may be the one running a turn.
+            if runningSession == sessionId {
+                isRunning = false
+            }
             append(.notice(message))
         }
     }
