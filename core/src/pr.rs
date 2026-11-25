@@ -316,6 +316,14 @@ impl GitHubClient {
     }
 }
 
+/// A review GitHub has posted.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SubmitResult {
+    pub url: String,
+    /// Set when cleaning up here failed afterwards. The review mustn't be submitted again.
+    pub warning: Option<String>,
+}
+
 /// What the reviewer confirmed in the submit sheet.
 pub(crate) struct Submission {
     pub pull_request_id: String,
@@ -345,16 +353,17 @@ pub(crate) struct SubmitAttempt {
 
 impl GitHubClient {
     /// Submits a review in two steps: the drafts go into a pending review, which
-    /// is recorded next to them, then submitted. Returns the review's URL.
-    /// GitHub is the source of truth, and nothing is ever deleted there.
-    /// Retrying after any failure is safe: it never posts the review twice.
+    /// is recorded next to them, then submitted. GitHub is the source of truth,
+    /// and nothing is ever deleted there. Retrying after an error is safe: it
+    /// never posts the review twice. Once GitHub has the review, the result is
+    /// a success, with a warning if cleaning up here failed.
     pub(crate) async fn submit_review(
         &self,
         store: &DraftStore,
         repo: &str,
         number: u64,
         submission: Submission,
-    ) -> Result<String, CoreError> {
+    ) -> Result<SubmitResult, CoreError> {
         let mut resume = None;
         let viewer = self.viewer().await?;
         // An earlier submit is settled first, by what GitHub has of its review now.
@@ -394,18 +403,24 @@ impl GitHubClient {
                 (Recovery::Posted, Some(remote)) => {
                     // An earlier try went through as asked; only its answer was lost.
                     let sent = sent_in(&record, &remote);
-                    store
-                        .finish_attempt(repo, number, &sent)
-                        .map_err(|error| posted_but(&remote.url, error))?;
-                    return Ok(remote.url);
+                    return Ok(posted(
+                        remote.url,
+                        store.finish_attempt(repo, number, &sent),
+                    ));
                 }
                 (Recovery::PostedDifferently, Some(remote)) => {
                     // What GitHub posted mustn't stay sendable; the rest stays for a new review.
                     let sent = sent_in(&record, &remote);
-                    store.finish_attempt(repo, number, &sent)?;
+                    let cleanup = match store.finish_attempt(repo, number, &sent) {
+                        Ok(()) => String::new(),
+                        Err(error) => format!(
+                            " Removing the posted ones here failed ({error}), so check your \
+                             drafts before submitting again."
+                        ),
+                    };
                     return Err(CoreError::Api(format!(
                         "an earlier submit was already posted as {} on commit {}: {}. This \
-                         submit wasn't sent. {}",
+                         submit wasn't sent. {}{cleanup}",
                         posted_as(&remote.state),
                         short_oid(&remote.commit_oid),
                         remote.url,
@@ -448,10 +463,11 @@ impl GitHubClient {
                      the review twice."
                 ))
             })?;
-        store
-            .finish_attempt(repo, number, &record.drafts)
-            .map_err(|error| posted_but(&url, error))?;
-        Ok(url)
+        // GitHub has it now: whatever happens here, it's a success.
+        Ok(posted(
+            url,
+            store.finish_attempt(repo, number, &record.drafts),
+        ))
     }
 
     /// Phase 1 without a record: puts the drafts in the viewer's pending review
@@ -680,11 +696,17 @@ fn stayed(drafts: &[DraftComment], sent: &[DraftComment]) -> String {
     }
 }
 
-fn posted_but(url: &str, error: CoreError) -> CoreError {
-    CoreError::Storage(format!(
-        "your review was posted ({url}), but its drafts couldn't be deleted here ({error}). \
-         Submitting the same review again removes them without posting it twice."
-    ))
+/// A review GitHub has, and how cleaning up after it went here.
+fn posted(url: String, cleanup: Result<(), CoreError>) -> SubmitResult {
+    SubmitResult {
+        warning: cleanup.err().map(|error| {
+            format!(
+                "Your review was posted, but cleaning up its drafts here failed ({error}). Don't \
+                 submit it again; delete the drafts it sent yourself."
+            )
+        }),
+        url,
+    }
 }
 
 /// Parses a page of `REMOTE_REVIEW`: the review and the cursor of the next page
@@ -1925,6 +1947,19 @@ mod tests {
             drafts: vec![sent],
         };
         (record, remote, submission)
+    }
+
+    #[test]
+    fn a_posted_review_is_a_success_even_if_cleanup_fails() {
+        let url = "https://github.com/o/r/pull/7#pullrequestreview-9";
+        assert_eq!(posted(url.into(), Ok(())).warning, None);
+        let failed = posted(url.into(), Err(CoreError::Storage("disk full".into())));
+        assert_eq!(failed.url, url);
+        let warning = failed.warning.unwrap();
+        assert!(
+            warning.contains("disk full") && warning.contains("Don't submit it again"),
+            "{warning}"
+        );
     }
 
     #[test]

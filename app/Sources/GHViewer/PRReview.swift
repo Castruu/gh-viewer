@@ -169,11 +169,13 @@ final class PRReview {
         isSubmitting = true
         defer { isSubmitting = false }
         do {
-            let reviewURL = try await store.hub.submit(repo: repo, number: number, event: event, body: body,
-                                                       draftIds: drafts.map(\.id))
+            let result = try await store.hub.submit(repo: repo, number: number, event: event, body: body,
+                                                    draftIds: drafts.map(\.id))
+            // GitHub has the review; a warning means only the cleanup here failed.
+            actionError = result.warning
             reloadDrafts()
             await load()
-            return reviewURL
+            return result.url
         } catch {
             actionError = error.coreMessage
             return nil

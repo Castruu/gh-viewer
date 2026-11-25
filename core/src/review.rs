@@ -10,7 +10,8 @@ use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, M
 use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable, remove_agent_config};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
 use crate::pr::{
-    DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread, Submission, may_be_pending,
+    DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread, Submission, SubmitResult,
+    may_be_pending,
 };
 use crate::{CoreError, DiffSide, GitHubClient};
 
@@ -216,8 +217,8 @@ impl ReviewHub {
 
     /// Submits the drafts with `draft_ids`, the ones the reviewer confirmed, as
     /// one review against the commit they were written on, then deletes them.
-    /// Returns the review's URL. Retrying after any failure is safe: it never
-    /// posts the review twice.
+    /// Retrying after an error is safe: it never posts the review twice. Once
+    /// GitHub has the review it's a success, with a warning if cleanup here failed.
     pub async fn submit(
         &self,
         repo: String,
@@ -225,7 +226,7 @@ impl ReviewHub {
         event: ReviewEvent,
         body: String,
         draft_ids: Vec<String>,
-    ) -> Result<String, CoreError> {
+    ) -> Result<SubmitResult, CoreError> {
         let key = (repo.clone(), number);
         let submitting = self.submits.lock().unwrap().entry(key.clone()).or_default().clone();
         let _submitting = submitting.lock().await;
