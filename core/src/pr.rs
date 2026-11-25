@@ -95,6 +95,9 @@ mutation($input: AddPullRequestReviewInput!) {
 /// The account gh is signed in as. A submit records it.
 const VIEWER: &str = "query { viewer { id login } }";
 
+/// The PR's head, read before drafts are added to a pending review.
+const PR_HEAD: &str = "query($id: ID!) { node(id: $id) { ... on PullRequest { headRefOid } } }";
+
 /// A review by id with a page of its comments: an earlier submit's, or the one a
 /// submit adds drafts to.
 const REMOTE_REVIEW: &str = r#"
@@ -432,8 +435,7 @@ impl GitHubClient {
 
         let (review_id, pending_url) = match resume {
             Some((review_id, remote)) => {
-                let new = missing(&submission.drafts, &remote.comments);
-                self.add_threads(&review_id, &new).await?;
+                self.add_threads(&submission, &review_id, &remote).await?;
                 (review_id, remote.url)
             }
             None => self.start(&submission).await?,
@@ -488,8 +490,7 @@ impl GitHubClient {
                     "your pending review on github.com was just deleted. Try again.".into(),
                 )
             })?;
-            let new = missing(&submission.drafts, &remote.comments);
-            self.add_threads(&pending.id, &new).await?;
+            self.add_threads(submission, &pending.id, &remote).await?;
             return Ok((pending.id, remote.url));
         }
         let variables = create_pending_variables(
@@ -507,7 +508,19 @@ impl GitHubClient {
         Ok((field("id")?, field("url")?))
     }
 
-    async fn add_threads(&self, review_id: &str, new: &[&DraftComment]) -> Result<(), CoreError> {
+    /// Adds the drafts `review`, the pending review on the submission's commit, lacks.
+    async fn add_threads(
+        &self,
+        submission: &Submission,
+        review_id: &str,
+        review: &RemoteReview,
+    ) -> Result<(), CoreError> {
+        let new = missing(&submission.drafts, &review.comments);
+        if !new.is_empty() {
+            // shortcut: a push between this read and the mutations still moves the drafts; GitHub takes no commit for them.
+            let head = self.head_oid(&submission.pull_request_id).await?;
+            check_threads_land(&head, &submission.commit_oid, &review.url)?;
+        }
         // Retrying after a failure is safe: drafts already in the pending review are skipped.
         let partial = |added: usize, error: CoreError| {
             CoreError::Api(format!(
@@ -547,6 +560,17 @@ impl GitHubClient {
             Err(error) => Err(error),
         };
         what_is_left(&lookup, &record.review_url)
+    }
+
+    async fn head_oid(&self, pull_request_id: &str) -> Result<String, CoreError> {
+        let response = self
+            .graphql(PR_HEAD, json!({ "id": pull_request_id }))
+            .await?;
+        let (data, messages) = split_response(&response)?;
+        match data.pointer("/node/headRefOid").and_then(Value::as_str) {
+            Some(head) if messages.is_empty() => Ok(head.to_owned()),
+            _ => Err(api_error(messages)),
+        }
     }
 
     async fn viewer(&self) -> Result<Account, CoreError> {
@@ -858,6 +882,21 @@ fn check_pending_commit(pending: &PendingReview, commit_oid: &str) -> Result<(),
         "your pending review on github.com is on commit {}, but you're reviewing {}. \
          Submit or cancel it on github.com, then try again.",
         short_oid(&pending.commit_oid),
+        short_oid(commit_oid)
+    )))
+}
+
+/// `addPullRequestReviewThread` puts a thread on the PR's head, whatever commit
+/// its pending review is on, so drafts written on an older commit would land on
+/// other lines. They're only added while the head is still their commit.
+fn check_threads_land(head: &str, commit_oid: &str, review_url: &str) -> Result<(), CoreError> {
+    if head == commit_oid {
+        return Ok(());
+    }
+    Err(CoreError::Api(format!(
+        "your pending review is on commit {}, and the PR has newer commits. GitHub would put \
+         your drafts on the newest commit's lines, so none were added. Submit or delete that \
+         review on github.com, then submit again: {review_url}",
         short_oid(commit_oid)
     )))
 }
@@ -2310,6 +2349,19 @@ mod tests {
             .to_string();
         assert!(
             message.contains("on commit 1234567") && message.contains("reviewing 6dcb09b"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn adds_drafts_to_a_pending_review_only_while_their_commit_is_the_head() {
+        let head = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
+        assert!(check_threads_land(head, head, "u#r").is_ok());
+        let message = check_threads_land(head, "1234567890abcdef", "u#r")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("on commit 1234567") && message.ends_with("u#r"),
             "{message}"
         );
     }
