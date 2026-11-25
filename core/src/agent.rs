@@ -44,7 +44,7 @@ pub(crate) const MCP_TOOLS: [&str; 3] = ["get_pr_context", "list_review_threads"
 /// A fresh name for the app's MCP server in one session. It can't be guessed,
 /// so no server from a config file can take its place and be auto-approved.
 pub(crate) fn own_mcp_server_name() -> String {
-    format!("{MCP_SERVER_NAME}-{}", &crate::mcp::random_hex()[..8])
+    format!("{MCP_SERVER_NAME}-{}", crate::mcp::random_hex())
 }
 
 /// A coding agent the app can run through its ACP adapter.
@@ -185,8 +185,8 @@ struct Shared {
     live: HashSet<u64>,
     sessions: HashMap<String, Session>,
     permissions: HashMap<String, PendingPermission>,
-    /// (session id, tool call id) of running Codex calls to the app's own MCP tools.
-    own_codex_calls: HashSet<(String, String)>,
+    /// Server of each running Codex call to the app's own MCP tools, by (session id, tool call id).
+    own_codex_calls: OwnCodexCalls,
     /// Output so far of running Codex commands, by (session id, tool call id).
     codex_output: HashMap<(String, String), String>,
     /// (session id, server name) of MCP servers the adapter reported it didn't start.
@@ -220,7 +220,7 @@ impl Shared {
             self.sessions.remove(session_id);
         }
         self.permissions.retain(|_, pending| !gone.contains(&pending.session_id));
-        self.own_codex_calls.retain(|(session_id, _)| !gone.contains(session_id));
+        self.own_codex_calls.retain(|(session_id, _), _| !gone.contains(session_id));
         self.codex_output.retain(|(session_id, _), _| !gone.contains(session_id));
         self.failed_mcp.retain(|(session_id, _)| !gone.contains(session_id));
     }
@@ -336,6 +336,9 @@ impl AgentHub {
             .find(|name| shared.failed_mcp.contains(&(session_id.clone(), (*name).clone())))
         {
             shared.failed_mcp.retain(|(id, _)| *id != session_id);
+            if process.closes {
+                process.cx.send_request(acp::CloseSessionRequest::new(session_id.clone())).detach();
+            }
             return Err(CoreError::Agent(format!(
                 "{} didn't start GH Viewer's review tools (MCP server `{name}`). Check the MCP servers in your {} config, then try again.",
                 kind.name(),
@@ -579,8 +582,10 @@ impl AgentHub {
                     let mut update = notification.update;
                     if kind == AgentKind::Codex {
                         let mut shared = lock(&notification_shared);
-                        if let Some(server) = failed_mcp_startup(&update) {
-                            shared.failed_mcp.insert((session_id.clone(), server));
+                        if let Some(failed) = failed_mcp_startup(&update) {
+                            // Calls already seen on it aren't the app's either.
+                            shared.own_codex_calls.retain(|(id, _), server| *id != session_id || *server != failed);
+                            shared.failed_mcp.insert((session_id.clone(), failed));
                         }
                         let own = shared.own_servers(&session_id);
                         track_own_codex_call(&mut shared.own_codex_calls, &session_id, &own, &update);
@@ -687,7 +692,7 @@ fn auto_allow(
     kind: AgentKind,
     request: &serde_json::Value,
     own_servers: &[String],
-    own_codex_calls: &mut HashSet<(String, String)>,
+    own_codex_calls: &mut OwnCodexCalls,
 ) -> Option<String> {
     let tool_call = &request["toolCall"];
     let ours = match kind {
@@ -714,7 +719,9 @@ fn auto_allow(
                     .unwrap_or_default()
                     .to_owned(),
             );
-            request["_meta"]["is_mcp_tool_approval"] == true && own_codex_calls.remove(&key)
+            // The server is checked again: its startup may have failed since.
+            request["_meta"]["is_mcp_tool_approval"] == true
+                && own_codex_calls.remove(&key).is_some_and(|server| own_servers.contains(&server))
         }
     };
     let options = request["options"].as_array().filter(|_| ours)?;
@@ -736,10 +743,12 @@ fn failed_mcp_startup(update: &acp::SessionUpdate) -> Option<String> {
     reported.then(|| server.to_owned())
 }
 
+type OwnCodexCalls = HashMap<(String, String), String>;
+
 /// Remembers Codex calls to the app's own MCP tools on `own_servers` until they
 /// finish. Codex fills `rawInput` from the MCP call itself, not from model output.
 fn track_own_codex_call(
-    own_codex_calls: &mut HashSet<(String, String)>,
+    own_codex_calls: &mut OwnCodexCalls,
     session_id: &str,
     own_servers: &[String],
     update: &acp::SessionUpdate,
@@ -748,11 +757,12 @@ fn track_own_codex_call(
         acp::SessionUpdate::ToolCall(call) => {
             let call_json = serde_json::to_value(call).unwrap_or_default();
             let input = &call_json["rawInput"];
-            if call_json["_meta"]["is_mcp_tool_call"] == true
-                && own_servers.iter().any(|server| input["server"] == server.as_str())
+            let server = input["server"].as_str().filter(|server| own_servers.iter().any(|own| own == server));
+            if let Some(server) = server
+                && call_json["_meta"]["is_mcp_tool_call"] == true
                 && MCP_TOOLS.iter().any(|tool| input["tool"] == *tool)
             {
-                own_codex_calls.insert((session_id.to_owned(), call.tool_call_id.to_string()));
+                own_codex_calls.insert((session_id.to_owned(), call.tool_call_id.to_string()), server.to_owned());
             }
         }
         acp::SessionUpdate::ToolCallUpdate(update)
@@ -1058,13 +1068,8 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async |request: acp::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
-                    // Says "closed" so tests can see the request arrive.
-                    let chunk = acp::ContentChunk::new("closed".into());
-                    cx.send_notification(acp::SessionNotification::new(
-                        request.session_id,
-                        acp::SessionUpdate::AgentMessageChunk(chunk),
-                    ))?;
+                async |request: acp::CloseSessionRequest, responder, _cx| {
+                    CLOSED.lock().unwrap().push(request.session_id.to_string());
                     responder.respond(acp::CloseSessionResponse::new())
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -1346,16 +1351,13 @@ mod tests {
 
     #[tokio::test]
     async fn closes_sessions_on_the_agent() {
-        let (hub, mut events) = fake_hub();
+        let (hub, _events) = fake_hub();
         let session = hub
-            .new_session(AgentKind::Claude, "/tmp".into(), vec![])
+            .new_session(AgentKind::Claude, "/tmp".into(), vec![server("http://closes")])
             .await
             .unwrap();
         hub.close_session(session.clone());
-        assert_eq!(
-            events.recv().await,
-            Some((session.clone(), message("closed")))
-        );
+        closed_on_the_agent(&session).await;
         let error = hub.prompt(session, "ping".into()).await.unwrap_err();
         assert!(error.to_string().contains("session has ended"), "{error}");
     }
@@ -1363,16 +1365,35 @@ mod tests {
     #[tokio::test]
     async fn fails_a_session_whose_own_mcp_server_was_skipped() {
         let (hub, _events) = fake_hub();
-        let server = McpServerHttp {
-            name: "gh-viewer-1a2b3c4d".into(),
-            url: "http://127.0.0.1:1234/mcp".into(),
-            headers: vec![HttpHeader { name: "Authorization".into(), value: "Bearer t".into() }],
-        };
         let error = hub
-            .new_session(AgentKind::Codex, "/skips-mcp".into(), vec![server])
+            .new_session(AgentKind::Codex, "/skips-mcp".into(), vec![server("http://skips")])
             .await
             .unwrap_err();
         assert!(error.to_string().contains("didn't start GH Viewer's review tools (MCP server `gh-viewer-1a2b3c4d`)"), "{error}");
+        // The agent had made the session, so it's closed there too.
+        closed_on_the_agent("http://skips Authorization=Bearer t").await;
+    }
+
+    /// Session ids the fake agent got `session/close` for.
+    static CLOSED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    async fn closed_on_the_agent(session: &str) {
+        for _ in 0..100 {
+            if CLOSED.lock().unwrap().iter().any(|id| id == session) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{session} wasn't closed on the agent");
+    }
+
+    /// The app's server as the fake agent sees it; the session id it returns is `"{url} Authorization=Bearer t"`.
+    fn server(url: &str) -> McpServerHttp {
+        McpServerHttp {
+            name: "gh-viewer-1a2b3c4d".into(),
+            url: url.into(),
+            headers: vec![HttpHeader { name: "Authorization".into(), value: "Bearer t".into() }],
+        }
     }
 
     // Payloads as claude-agent-acp 0.112.0 and codex-acp 2.12.0 sent them on
@@ -1396,7 +1417,7 @@ mod tests {
     fn matches_own_mcp_tools_as_claude_sends_them() {
         let own = ["gh-viewer".to_string()];
         let allow =
-            |request: &serde_json::Value, kind| auto_allow(kind, request, &own, &mut HashSet::new());
+            |request: &serde_json::Value, kind| auto_allow(kind, request, &own, &mut HashMap::new());
         let request = edited(CLAUDE_REQUEST, &[]);
         assert_eq!(
             allow(&request, AgentKind::Claude).as_deref(),
@@ -1406,8 +1427,8 @@ mod tests {
         assert_eq!(allow(&request, AgentKind::Codex), None);
         // Only the session's own server name counts.
         let other_session = ["gh-viewer-1a2b3c4d".to_string()];
-        assert_eq!(auto_allow(AgentKind::Claude, &request, &other_session, &mut HashSet::new()), None);
-        assert_eq!(auto_allow(AgentKind::Claude, &request, &[], &mut HashSet::new()), None);
+        assert_eq!(auto_allow(AgentKind::Claude, &request, &other_session, &mut HashMap::new()), None);
+        assert_eq!(auto_allow(AgentKind::Claude, &request, &[], &mut HashMap::new()), None);
 
         let meta = "/toolCall/_meta/claudeCode";
         let from_user_config = edited(
@@ -1453,7 +1474,7 @@ mod tests {
         let session_id = notification.session_id.to_string();
         let request = edited(CODEX_REQUEST, &[]);
         let own = ["gh-viewer".to_string()];
-        let mut calls = HashSet::new();
+        let mut calls = HashMap::new();
 
         // Unknown until the tool call is announced, then allowed once.
         assert_eq!(auto_allow(AgentKind::Codex, &request, &own, &mut calls), None);
@@ -1488,6 +1509,10 @@ mod tests {
         track_own_codex_call(&mut calls, &session_id, &own, &notification.update);
         let command = edited(CODEX_REQUEST, &[("/_meta", serde_json::json!({}))]);
         assert_eq!(auto_allow(AgentKind::Codex, &command, &own, &mut calls), None);
+
+        // A call tracked before its server's startup failed isn't allowed once it has.
+        track_own_codex_call(&mut calls, &session_id, &own, &notification.update);
+        assert_eq!(auto_allow(AgentKind::Codex, &request, &[], &mut calls), None);
     }
 
     #[test]
