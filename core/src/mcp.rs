@@ -22,9 +22,11 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::{CoreError, DiffSide, runtime};
 
-/// Tool calls are quick local requests. These limits stop clients that never
-/// send one, before authentication, from holding the app's file descriptors.
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// These limits stop clients that never send a request, before authentication,
+/// from holding the app's file descriptors. Hyper also applies the timeout to idle
+/// keep-alive connections, and agents often think for a while between tool calls,
+/// so it's long enough not to keep closing their connections.
+const HEADER_READ_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(60) };
 const MAX_CONNECTIONS: usize = 64;
 
 /// What one agent session's tools can see and do, for one PR.
