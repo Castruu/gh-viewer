@@ -93,36 +93,43 @@ impl ReviewHub {
     /// checkout stays on the commit they were written against.
     pub async fn open(&self, repo: String, number: u64) -> Result<OpenedReview, CoreError> {
         let mut detail = self.github.fetch_pull_request(repo.clone(), number).await?;
-        let pin = self.drafts.pinned_commit(repo.clone(), number)?;
-        let mut checkout = self
-            .checkouts
-            .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin.clone())
-            .await?;
-        // A push between the two reads leaves thread positions on another commit.
-        // If it persists, the diff lists threads by file instead of inline.
-        if detail.head_oid != checkout.latest_head_oid {
-            detail = self.github.fetch_pull_request(repo.clone(), number).await?;
-        }
-        let mut files = self.checkouts.diff(checkout.clone()).await?;
-        // A draft made meanwhile, e.g. by an agent on the diff still shown, pins the PR to that commit.
-        let pinned = self.drafts.pinned_commit(repo.clone(), number)?;
-        if pinned != pin {
-            checkout = self
+        let mut pin = self.drafts.pinned_commit(repo.clone(), number)?;
+        // A draft made meanwhile, e.g. by an agent on the diff still shown, pins the
+        // PR to that commit; then it's loaded once more on that commit.
+        for _ in 0..2 {
+            let checkout = self
                 .checkouts
-                .prepare(repo.clone(), number, detail.base_ref_name.clone(), pinned)
+                .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin.clone())
                 .await?;
-            files = self.checkouts.diff(checkout.clone()).await?;
-        }
-        let review = OpenedReview { detail, checkout, files };
-
-        let mut reviews = self.reviews.lock().unwrap();
-        match reviews.get(&(repo.clone(), number)) {
-            Some(shared) => *shared.write().unwrap() = review.clone(),
-            None => {
-                reviews.insert((repo, number), Arc::new(RwLock::new(review.clone())));
+            // A push between the two reads leaves thread positions on another commit.
+            // If it persists, the diff lists threads by file instead of inline.
+            if detail.head_oid != checkout.latest_head_oid {
+                detail = self.github.fetch_pull_request(repo.clone(), number).await?;
             }
+            let files = self.checkouts.diff(checkout.clone()).await?;
+            let review = OpenedReview { detail: detail.clone(), checkout, files };
+
+            let mut reviews = self.reviews.lock().unwrap();
+            let shared = reviews.get(&(repo.clone(), number)).cloned();
+            // Agents add drafts under this lock's read side, so the pin read here
+            // stays true until the review is published.
+            let published = shared.as_ref().map(|shared| shared.write().unwrap());
+            let pinned = self.drafts.pinned_commit(repo.clone(), number)?;
+            if pinned != pin {
+                pin = pinned;
+                continue;
+            }
+            match published {
+                Some(mut published) => *published = review.clone(),
+                None => {
+                    reviews.insert((repo, number), Arc::new(RwLock::new(review.clone())));
+                }
+            }
+            return Ok(review);
         }
-        Ok(review)
+        Err(CoreError::Git(format!(
+            "Drafts on {repo}#{number} kept changing which commit it's pinned to while it loaded. Try again."
+        )))
     }
 
     /// Starts an agent session in the PR's worktree, with the app's MCP tools
