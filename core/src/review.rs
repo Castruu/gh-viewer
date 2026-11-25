@@ -228,7 +228,7 @@ impl ReviewHub {
         draft_ids: Vec<String>,
     ) -> Result<SubmitResult, CoreError> {
         let key = (repo.clone(), number);
-        let submitting = self.submits.lock().unwrap().entry(key.clone()).or_default().clone();
+        let submitting = self.submit_lock(&repo, number);
         let _submitting = submitting.lock().await;
         let (pull_request_id, head) = {
             let review = self.review(&key)?;
@@ -245,9 +245,8 @@ impl ReviewHub {
     /// anything on GitHub. Returns the link of that submit's review if it may
     /// still be pending on github.com, for the reviewer to submit or delete there.
     pub async fn discard(&self, repo: String, number: u64) -> Result<Option<String>, CoreError> {
-        let key = (repo.clone(), number);
         // Not while a submit of this PR is running.
-        let submitting = self.submits.lock().unwrap().entry(key).or_default().clone();
+        let submitting = self.submit_lock(&repo, number);
         let _submitting = submitting.lock().await;
         let record = self.drafts.attempt(&repo, number)?;
         self.drafts.clear(repo, number)?;
@@ -326,6 +325,13 @@ impl ReviewHub {
             return Err(CoreError::Agent("Reload the PR first: its last reload failed, so the agent could see other code than the diff.".into()));
         }
         Ok(())
+    }
+
+    /// Serializes a PR's submits and discards. Keyed case-insensitively, like the
+    /// drafts and submit record it guards.
+    fn submit_lock(&self, repo: &str, number: u64) -> Arc<tokio::sync::Mutex<()>> {
+        let key = (repo.to_ascii_lowercase(), number);
+        self.submits.lock().unwrap().entry(key).or_default().clone()
     }
 
     fn review(&self, key: &Key) -> Result<Arc<RwLock<OpenedReview>>, CoreError> {
@@ -929,6 +935,16 @@ mod tests {
         fn on_event(&self, _session_id: String, event: AgentEvent) {
             self.0.lock().unwrap().push(event);
         }
+    }
+
+    #[test]
+    fn one_submit_lock_per_pr_whatever_the_case_of_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let drafts = Arc::new(DraftStore::new(root.clone()));
+        let hub = ReviewHub::new(root, Arc::new(GitHubClient::new()), drafts, Arc::new(Recorder::default()));
+        assert!(Arc::ptr_eq(&hub.submit_lock("Org/Repo", 7), &hub.submit_lock("org/repo", 7)));
+        assert!(!Arc::ptr_eq(&hub.submit_lock("org/repo", 7), &hub.submit_lock("org/repo", 8)));
     }
 
     /// The whole path on a real public PR: open, start Claude with the app's MCP
