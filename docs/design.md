@@ -78,6 +78,11 @@ so line numbers and hunks match what GitHub accepts for comments. The diff is
 between commits, not the working tree, so edits the agent makes never show up
 as part of the PR.
 
+Each review thread carries the commit its lines refer to, read from its
+comments. That's usually the head, but GitHub keeps a comment posted on an
+older commit there until the next push. A thread shows under a line only when
+its commit is the diff's; otherwise it's listed in the file's header.
+
 Git auth uses `gh auth git-credential` as a per-command credential helper. No
 token is written to disk or into a remote URL. The app's git commands ignore
 your global and system git config (`GIT_CONFIG_GLOBAL=/dev/null`). Otherwise,
@@ -103,29 +108,45 @@ can never post to GitHub.
 
 **Submit.** GitHub is the source of truth, and the app never deletes anything
 there. Only the drafts the submit sheet showed go out, in two steps, so a
-retry after a lost answer never posts a review twice:
+retry after a lost answer never posts a review twice. The gh token is read
+once and used for every call of the submit, so switching accounts midway can't
+split it:
 
 1. The drafts go into a pending review on their pinned commit. If you already
    have one on that commit, the drafts it lacks are added with
    `addPullRequestReviewThread`. That call takes no commit: GitHub puts the
    comments on the PR's head, whatever the review's commit. So if the PR has
    newer commits, the submit stops and asks you to submit or delete that review
-   on github.com. If yours is on another commit, the submit stops too. Otherwise `addPullRequestReview` without an event starts one with
-   every draft as a `DraftPullRequestReviewThread`.
+   on github.com. If yours is on another commit, the submit stops too.
+   Otherwise `addPullRequestReview` without an event starts one with every
+   draft as a `DraftPullRequestReviewThread`.
 2. A submit record (the PR's node id, the signed-in account, the review's id
    and link, the commit, event, body and the drafts as sent) is saved next to
-   the drafts. The file, its directory and any directories just made are
-   synced. Then `submitPullRequestReview` submits the review with the event
-   and body. Any error before GitHub confirms keeps the record.
+   the drafts. The file, its directory and each directory level down from the
+   app's data dir are synced. Then `submitPullRequestReview` submits the
+   review with the event and body. If GitHub refuses it, e.g. an approval of
+   your own PR, nothing is posted and the pending review stays: change the
+   verdict or fix the cause and submit again. Any other error before GitHub
+   confirms keeps the record, and retrying is safe.
 
 Drafts and review comments are paired one to one, on path, original range
-(which later pushes don't move), text and side where it's known, against all
-of a review's comments. Once GitHub confirms, the drafts that were sent are
-deleted, then the record; drafts added meanwhile stay. If that cleanup fails,
-the submit still succeeds, with a warning not to submit again.
+(which later pushes don't move; the current one if GitHub leaves it out), text
+and side where it's known, against all of a review's comments. GitHub doesn't
+report a comment's side, so it's read from the diff hunk: an added line's is
+right, a removed line's left, and a context line's could be either. Comments
+on a known side are paired first. Once GitHub confirms, the review is read
+back and only the drafts it holds are deleted, then the record. Drafts added
+meanwhile stay, and so do any it lacks, e.g. deleted from the pending review
+on github.com, with a warning. If that read fails, the drafts and the record
+stay, and the warning says to submit again to finish, which won't post twice.
+If the cleanup fails, the submit still succeeds. Its warning says to submit
+again if the record is still there, and not to if only saving its removal
+failed.
 
 A later submit with a record settles it first. Signed in as another account,
-it stops. Otherwise it looks that review up:
+it stops. Otherwise it looks that review up. If GitHub leaves out the review's
+commit, it's read again once; if the commit is still missing, the submit fails
+and retrying is safe. Then:
 
 - Not found: it was deleted while pending, so the record is forgotten.
 - Pending on the same commit: its missing drafts are added, as in step 1, and

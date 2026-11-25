@@ -93,6 +93,11 @@ cargo test -p ghv_core -- --ignored       # live: GitHub (read-only) and your Cl
 swift test --package-path app             # app logic; run scripts/build.sh first
 ```
 
+The live submit tests post real reviews and push commits, so they only run on
+a PR you name, one of yours that's safe to review:
+`GHV_LIVE_SUBMIT_PR=owner/repo#n cargo test -p ghv_core live_submit -- --ignored --test-threads=1`.
+See `mod live_submit` in `core/src/review.rs` for what it needs.
+
 With only the Command Line Tools installed (no Xcode), swift-testing sits outside
 SwiftPM's search paths, so pass them to `swift test`:
 
