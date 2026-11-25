@@ -1116,7 +1116,9 @@ mod tests {
     /// in another hunk of that file.
     /// `GHV_LIVE_SUBMIT_PR=o/r#1 cargo test -p ghv_core live_submit -- --ignored --nocapture`
     /// Local files go to temp dirs. Submitted reviews stay on the PR, as GitHub
-    /// can't delete them; `h` and `i` also push a commit to the PR's branch.
+    /// can't delete them; `h` and `i` also push a commit to the PR's branch,
+    /// which moves its lines, so run `j`, which needs a removed and an added line
+    /// with the same number, before them.
     mod live_submit {
         use super::*;
         use crate::checkout::DiffHunk;
@@ -1135,7 +1137,7 @@ mod tests {
           repository(owner: $owner, name: $name) { pullRequest(number: $number) {
             reviews(first: 100) { nodes {
               id databaseId state body url viewerDidAuthor commit { oid }
-              comments(first: 100) { nodes { path line startLine originalLine originalStartLine body } }
+              comments(first: 100) { nodes { id path line startLine originalLine originalStartLine body diffHunk } }
             } }
           } }
         }"#;
@@ -1149,6 +1151,16 @@ mod tests {
         /// What "Cancel review" on github.com does.
         const DELETE_PENDING: &str = r#"
         mutation($id: ID!) { deletePullRequestReview(input: { pullRequestReviewId: $id }) { pullRequestReview { id } } }"#;
+
+        /// Deleting one comment of your pending review on github.com.
+        const DELETE_COMMENT: &str = r#"
+        mutation($id: ID!) { deletePullRequestReviewComment(input: { id: $id }) { clientMutationId } }"#;
+
+        /// "Submit review" on github.com, as a comment.
+        const SUBMIT_ON_GITHUB: &str = r#"
+        mutation($id: ID!, $body: String!) {
+          submitPullRequestReview(input: { pullRequestReviewId: $id, event: COMMENT, body: $body }) { pullRequestReview { url } }
+        }"#;
 
         struct Live {
             repo: String,
@@ -1369,6 +1381,23 @@ mod tests {
             dir.with_extension("aside")
         }
 
+        /// A `BEFORE_PHASE_2` hook: deletes the comment "(k) deleted on github.com"
+        /// from the recorded pending review, as the reviewer could on github.com.
+        fn delete_on_github(record: &Path) {
+            let record: Value = serde_json::from_slice(&fs::read(record).unwrap()).unwrap();
+            let review = record["review_id"].as_str().unwrap();
+            let query = format!(
+                "query={{ node(id: \"{review}\") {{ ... on PullRequestReview {{ comments(first: 50) {{ nodes {{ id body }} }} }} }} }}"
+            );
+            let comments = gh(&["api", "graphql", "-f", &query]);
+            let nodes = comments["data"]["node"]["comments"]["nodes"].as_array().unwrap();
+            let comment = nodes.iter().find(|c| c["body"] == "(k) deleted on github.com").unwrap();
+            let id = comment["id"].as_str().unwrap();
+            let mutation = format!("query=mutation {{ deletePullRequestReviewComment(input: {{ id: \"{id}\" }}) {{ clientMutationId }} }}");
+            let deleted = gh(&["api", "graphql", "-f", &mutation]);
+            assert!(deleted.get("errors").is_none(), "{deleted}");
+        }
+
         /// `BEFORE_PHASE_2`'s hook: copies the record and the drafts next to it.
         fn set_aside(record: &Path) {
             let dir = record.parent().unwrap();
@@ -1385,7 +1414,7 @@ mod tests {
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         }
 
-        /// Runs `gh` (read-only calls only) and parses its JSON output.
+        /// Runs `gh` and parses its JSON output.
         fn gh(args: &[&str]) -> Value {
             serde_json::from_str(&run(Path::new("."), &[&["gh"], args].concat())).unwrap()
         }
@@ -1576,8 +1605,10 @@ mod tests {
             let drafts = [live.add(t.range(), "(e) two lines", &head), live.add(t.removed(), "(e) a removed line", &head)];
             let count = live.submitted().await;
 
-            let error = live.submit(ReviewEvent::Approve, "(e) approve", &drafts).await.unwrap_err();
+            let error = live.submit(ReviewEvent::Approve, "(e) approve", &drafts).await.unwrap_err().to_string();
             eprintln!("[e] refusal: {error}");
+            assert_eq!(error.matches("GitHub API error").count(), 1, "{error}");
+            assert!(error.contains("approve your own pull request") && error.contains("Nothing was posted"), "{error}");
             let unsettled = live.drafts.unsettled(live.repo.clone(), live.number).unwrap().expect("the record is kept");
             assert_eq!(unsettled.draft_ids, [drafts[0].id.clone(), drafts[1].id.clone()]);
             let pending = live.pending().await.expect("the pending review is kept on GitHub");
@@ -1660,7 +1691,11 @@ mod tests {
             let opened = live.open().await;
             assert_eq!(live.pending().await, None);
             let (t, old) = (Targets::of(&opened), opened.checkout.head_oid.clone());
-            let drafts = [live.add(t.single(), "(h) one line", &old), live.add(t.removed(), "(h) a removed line", &old)];
+            let run = UNIX_EPOCH.elapsed().unwrap().as_millis();
+            let drafts = [
+                live.add(t.single(), &format!("(h) one line, run {run}"), &old),
+                live.add(t.removed(), &format!("(h) a removed line, run {run}"), &old),
+            ];
             let new = live.push_a_commit(&opened.detail.head_ref_name, &t.path).await;
 
             let pinned = live.open().await;
@@ -1685,6 +1720,15 @@ mod tests {
             live.assert_settled();
             let moved = live.open().await;
             assert_eq!((moved.checkout.head_oid.as_str(), moved.checkout.latest_head_oid.as_str()), (new.as_str(), new.as_str()));
+            // Each thread says which commit its line is on: the older one until GitHub
+            // moves it, the push added two lines above the right side's.
+            for draft in &drafts {
+                let thread = moved.detail.threads.iter().find(|t| t.comments.iter().any(|c| c.body == draft.body)).unwrap();
+                eprintln!("[h] thread {:?}: line {:?} on {:?}", draft.body, thread.line, thread.commit_oid);
+                let moved_by = if thread.commit_oid.as_deref() == Some(new.as_str()) && draft.side == DiffSide::Right { 2 } else { 0 };
+                assert!(thread.commit_oid.as_deref() == Some(old.as_str()) || thread.commit_oid.as_deref() == Some(new.as_str()));
+                assert_eq!(thread.line, Some(draft.line + moved_by));
+            }
         }
 
         /// (i) GitHub adds threads to a pending review on the PR's head, whatever the
@@ -1722,6 +1766,86 @@ mod tests {
             assert_eq!(review["commit"]["oid"], old.as_str());
             assert_eq!(comments.len(), 2);
             assert_sent(&review, &comments, &drafts, false);
+            live.assert_settled();
+        }
+
+        /// (j) The same text on a removed and an added line with the same number.
+        /// The left comment is deleted on github.com, and the review is submitted
+        /// there. Settling removes only the right draft, so the left one is still
+        /// here and goes out on its own, and the right one isn't sent twice.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts reviews on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_j_same_text_on_both_sides_of_a_line() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            assert!(t.added.contains(&t.removed), "needs an added line numbered like the removed one");
+            let body = format!("(j) same text, run {}", UNIX_EPOCH.elapsed().unwrap().as_millis());
+            let left = live.add(t.removed(), &body, &head);
+            let right = live.add(t.spot(t.removed, DiffSide::Right, None), &body, &head);
+            live.submit(ReviewEvent::Approve, "(j) approve", &[left.clone(), right.clone()]).await.unwrap_err();
+
+            // On github.com: delete the left comment, then submit the review.
+            let pending = live.pending().await.unwrap();
+            let nodes = pending["comments"]["nodes"].as_array().unwrap();
+            let on_removed = |n: &&Value| n["diffHunk"].as_str().unwrap().lines().last().unwrap().starts_with('-');
+            let removed = nodes.iter().find(on_removed).unwrap();
+            live.graphql(DELETE_COMMENT, json!({ "id": removed["id"] })).await;
+            let browser = json!({ "id": pending["id"], "body": "(j) submitted on github.com" });
+            live.graphql(SUBMIT_ON_GITHUB, browser).await;
+            let count = live.submitted().await;
+
+            let error = live.submit(ReviewEvent::Comment, "(j) retry", &[left.clone(), right.clone()]).await.unwrap_err().to_string();
+            eprintln!("[j] error: {error}");
+            assert!(error.contains("already posted as a comment"), "{error}");
+            assert_eq!(live.drafts.list(live.repo.clone(), live.number).unwrap(), std::slice::from_ref(&left));
+            assert_eq!(live.drafts.unsettled(live.repo.clone(), live.number).unwrap(), None);
+            assert_eq!(live.submitted().await, count);
+            let on_github = live.review(pending["url"].as_str().unwrap()).await;
+            let comments = live.comments(&on_github);
+            show("j github.com", &on_github, &comments);
+            assert_sent(&on_github, &comments, std::slice::from_ref(&right), true);
+
+            let posted = live.submit(ReviewEvent::Comment, "(j) the left one", std::slice::from_ref(&left)).await.unwrap();
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("j app", &review, &comments);
+            assert_eq!(comments.len(), 1);
+            assert_sent(&review, &comments, std::slice::from_ref(&left), true);
+            live.assert_settled();
+        }
+
+        /// (k) A comment is deleted from the pending review on github.com right
+        /// before phase 2. The review posts without it, and its draft stays here
+        /// with a warning instead of being removed as sent.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_k_a_comment_deleted_before_phase_2() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let kept = live.add(t.single(), "(k) posted", &head);
+            let gone = live.add(t.removed(), "(k) deleted on github.com", &head);
+
+            *BEFORE_PHASE_2.lock().unwrap() = Some(delete_on_github);
+            let result = live.submit(ReviewEvent::Comment, "(k) summary", &[kept.clone(), gone.clone()]).await;
+            *BEFORE_PHASE_2.lock().unwrap() = None;
+            let posted = result.unwrap();
+            let warning = posted.warning.clone().expect("a warning for the draft that wasn't posted");
+            eprintln!("[k] warning: {warning}");
+            assert!(warning.contains("without 1 of its drafts") && warning.contains(&format!("{}:{}", t.path, t.removed)), "{warning}");
+            assert_eq!(live.drafts.list(live.repo.clone(), live.number).unwrap(), [gone]);
+            assert_eq!(live.drafts.unsettled(live.repo.clone(), live.number).unwrap(), None);
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("k", &review, &comments);
+            assert_eq!(comments.len(), 1);
+            assert_sent(&review, &comments, std::slice::from_ref(&kept), true);
+            assert_eq!(live.hub.discard(live.repo.clone(), live.number).await.unwrap(), None);
             live.assert_settled();
         }
     }
