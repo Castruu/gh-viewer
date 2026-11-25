@@ -220,6 +220,8 @@ final class PRReview {
     /// Deletes the saved transcript and empties the chat. The next question starts a fresh session.
     func clearChat() {
         guard !chat.isRunning else { return }
+        // Otherwise the old sessions' MCP endpoints would keep accepting drafts.
+        chat.sessions.values.forEach { store.hub.closeAgent(sessionId: $0) }
         chat.clear()
         do {
             try store.chats.delete(repo: repo, number: number)
