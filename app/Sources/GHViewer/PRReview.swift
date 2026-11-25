@@ -189,8 +189,7 @@ final class PRReview {
         chat.isRunning = true
         isCancelPending = false
         defer {
-            chat.isRunning = false
-            chat.runningSession = nil
+            chat.endTurn()
             isCancelPending = false
             saveChat()
         }

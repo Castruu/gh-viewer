@@ -69,6 +69,19 @@ struct ChatState {
         }
     }
 
+    /// Ends the running turn. The core answers its open permission requests as
+    /// cancelled, so their cards say so instead of opening again in a later turn.
+    mutating func endTurn() {
+        isRunning = false
+        runningSession = nil
+        for index in items.indices {
+            if case .permission(let requestId, let title, let toolTitle, let options, nil) = items[index].kind {
+                items[index].kind = .permission(requestId: requestId, title: title, toolTitle: toolTitle,
+                                                options: options, answer: "Not answered")
+            }
+        }
+    }
+
     mutating func resolvePermission(_ requestId: String, optionId: String?) {
         guard let index = items.lastIndex(where: { $0.permissionRequestId == requestId }),
               case .permission(_, let title, let toolTitle, let options, _) = items[index].kind
