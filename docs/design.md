@@ -20,7 +20,7 @@ edit and submit those.
 | 4 | "Viewed" per file syncs with GitHub's own state (`viewerViewedState`, `markFileAsViewed`). |
 | 5 | The agent drafts comments through an MCP server that the app serves over HTTP on localhost. Drafts stay local until you submit. Every draft is checked against the diff. |
 | 5a | Drafts are pinned to the commit they were written against. While a PR has drafts, its diff stays on that commit, with a "new commits pushed" banner, and the review is submitted against it. Submitting or discarding the drafts moves the diff to the latest head. |
-| 5b | If you already have a pending review on github.com, submitting adds your drafts to it and submits it. Retries skip comments that are already in it. |
+| 5b | If you already have a pending review on github.com on the same commit, submitting adds your drafts to it and submits it. Retries skip comments that are already in it. The app never deletes anything on GitHub. |
 | 5c | Agent drafts don't need accepting. They're sent like yours, but the submit sheet lists them separately under "Drafted by Claude/Codex". |
 | 5d | Comments in your github.com pending review show inline in the diff as read-only "Pending on GitHub" cards. |
 | 6 | The app passes through each agent's own permission settings and adds no default of its own. Permission requests show in the chat. The one exception: calls to the app's own MCP tools (`get_pr_context`, `list_review_threads`, `draft_comment`) are allowed once automatically, because they're local and reversible. |
@@ -101,23 +101,37 @@ enforces. If not, it returns an error the agent can act on. Otherwise it adds
 the comment to the PR's local drafts, and the UI shows it right away. The agent
 can never post to GitHub.
 
-**Submit.** Two steps, so a retry after a lost answer never posts a review
-twice. Only the drafts the submit sheet showed go out. First they go into a
-pending review: `addPullRequestReview` without an event starts one with
-`commitOID` set to the drafts' pinned commit and every draft as a
-`DraftPullRequestReviewThread`. If you already have a pending review on
-GitHub, each draft is added to it with `addPullRequestReviewThread` instead,
-skipping any already there. Next, a submit record (the review's id, commit,
-event, body and the drafts as sent) is saved next to the drafts. Then
-`submitPullRequestReview` submits the review with the event and body.
+**Submit.** GitHub is the source of truth, and the app never deletes anything
+there. Only the drafts the submit sheet showed go out, in two steps, so a
+retry after a lost answer never posts a review twice:
 
-A retry with a record looks that review up first. If it was submitted, the
-submit is done, or fails naming what was posted when the new submit differs.
-If it's pending, only that review is continued. A lookup error keeps the
-record. If GitHub refuses the final step, a review the attempt started is
-deleted. Drafts are deleted only after GitHub accepts the review, matched by id
-and content, and drafts added meanwhile stay. Submits for one PR run one at a
-time.
+1. The drafts go into a pending review on their pinned commit. If you already
+   have one on that commit, the drafts it lacks are added with
+   `addPullRequestReviewThread`, compared with all of its comments. If yours
+   is on another commit, the submit stops. Otherwise `addPullRequestReview`
+   without an event starts one with every draft as a
+   `DraftPullRequestReviewThread`.
+2. A submit record (the PR's node id, the review's id and link, the commit,
+   event, body and the drafts as sent) is saved next to the drafts, with the
+   file and its directory synced. Then `submitPullRequestReview` submits the
+   review with the event and body. Any error keeps the record.
+
+On success the drafts that were sent are deleted, matched by id and content,
+and then the record; drafts added meanwhile stay. A later submit with a record
+settles it first, by looking that review up:
+
+- Not found: it was deleted while pending, so the record is forgotten.
+- Pending on the same commit: its missing drafts are added and it's submitted.
+- Pending on another commit: its link is shown, and it's left for you.
+- Submitted: if its commit, verdict and body on GitHub and the drafts match
+  this submit exactly, the submit is done. Otherwise the error names what was
+  posted, the record is settled, and the drafts stay.
+- Any other lookup error keeps the record and fails; retrying is safe.
+
+Drafts in an unsettled pending review can't be edited or deleted here. Discard
+Drafts waits for a running submit, deletes the drafts and then the record, and
+says when a review may still be pending on github.com, with its link. Submits
+and discards for one PR run one at a time.
 
 **Permissions.** ACP `session/request_permission` shows up as a prompt in the
 chat with the agent's own options. The app answers only what you pick, or
