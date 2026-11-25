@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Owns the Rust review hub and one `PRReview` per PR opened in the window.
 /// Not observable itself: views observe the `PRReview`s, and this is only their cache,
@@ -20,6 +20,13 @@ final class ReviewStore {
         hub = ReviewHub(root: root, github: github, drafts: drafts, listener: listener)
         drafts.setListener(listener: listener)
         listener.store = self
+        // Chats are saved when a turn ends; a turn still running at quit would otherwise be lost.
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.reviews.values.forEach { $0.saveChatIfRunning() }
+            }
+        }
     }
 
     /// The review for a PR, created on first use. Keyed by URL like the sidebar.

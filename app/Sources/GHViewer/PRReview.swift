@@ -228,6 +228,13 @@ final class PRReview {
         }
     }
 
+    /// Saves a turn that's still streaming; finished turns were saved when they ended.
+    func saveChatIfRunning() {
+        if chat.isRunning {
+            saveChat()
+        }
+    }
+
     private func saveChat() {
         do {
             try store.chats.save(chat.items, repo: repo, number: number)
