@@ -36,10 +36,22 @@ final class ReviewStore {
     /// Called when `review` uses an agent. Closes the sessions of the least
     /// recently used PRs beyond `maxPRsWithAgents`, unless a turn runs there.
     func usedAgent(on review: PRReview) {
-        let evicted = agentPRs.use(review.url, limit: Self.maxPRsWithAgents) { url in
+        agentPRs.use(review.url)
+        trimAgentSessions()
+    }
+
+    /// Closes sessions beyond the limit that a running turn kept open, e.g.
+    /// once that turn ends. Doesn't change which PRs count as recently used.
+    func trimAgentSessions() {
+        let evicted = agentPRs.trim(limit: Self.maxPRsWithAgents) { url in
             reviews[url]?.chat.isRunning != true
         }
         evicted.forEach { reviews[$0]?.closeAgentSessions() }
+    }
+
+    /// Called when `review` closed its last session, e.g. by Clear Chat.
+    func closedAgents(on review: PRReview) {
+        agentPRs.remove(review.url)
     }
 
     /// The review for a PR, created on first use. Keyed by URL like the sidebar.
@@ -73,11 +85,19 @@ final class ReviewStore {
 struct RecentlyUsed {
     private(set) var keys: [String] = []
 
-    /// Moves `key` to the end. Then drops keys from the front while there are
-    /// more than `limit`, skipping those `canDrop` refuses, and returns them.
-    mutating func use(_ key: String, limit: Int, canDrop: (String) -> Bool) -> [String] {
-        keys.removeAll { $0 == key }
+    /// Moves `key` to the end, as the most recently used.
+    mutating func use(_ key: String) {
+        remove(key)
         keys.append(key)
+    }
+
+    mutating func remove(_ key: String) {
+        keys.removeAll { $0 == key }
+    }
+
+    /// Drops keys from the front while there are more than `limit`, skipping
+    /// those `canDrop` refuses and the most recent, and returns them.
+    mutating func trim(limit: Int, canDrop: (String) -> Bool) -> [String] {
         var dropped: [String] = []
         for old in keys.dropLast() where keys.count - dropped.count > limit && canDrop(old) {
             dropped.append(old)

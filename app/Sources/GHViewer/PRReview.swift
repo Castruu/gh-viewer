@@ -201,6 +201,8 @@ final class PRReview {
             chat.endTurn()
             isCancelPending = false
             saveChat()
+            // Sessions an over-limit eviction skipped while this turn ran.
+            store.trimAgentSessions()
         }
         do {
             let sessionId = try await session(for: kind)
@@ -249,6 +251,7 @@ final class PRReview {
         // Otherwise the old sessions' MCP endpoints would keep accepting drafts.
         chat.sessions.values.forEach { store.hub.closeAgent(sessionId: $0) }
         chat.clear()
+        store.closedAgents(on: self)
         do {
             try store.chats.delete(repo: repo, number: number)
             isChatArchiveUnreadable = false
