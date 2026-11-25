@@ -7,6 +7,8 @@ struct ChatArchive {
     let root: URL
     /// Older items are dropped beyond this, which keeps files small and launches quick.
     static let maxItems = 500
+    /// A tool's output is saved up to this many characters, from its end, where results and errors are.
+    static let maxOutputLength = 64 * 1024
 
     struct Saved {
         let items: [ChatItem]
@@ -111,6 +113,7 @@ private enum ArchivedItem: Codable {
             case .completed: "completed"
             case .failed: "failed"
             }
+            let output = output.map { $0.count > ChatArchive.maxOutputLength ? "…" + $0.suffix(ChatArchive.maxOutputLength) : $0 }
             self = .tool(id: id, title: title, kind: kind, status: status, output: output)
         case .plan(let entries):
             self = .plan(entries: entries.map { ArchivedPlanEntry(content: $0.content, status: $0.status) })

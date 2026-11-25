@@ -50,6 +50,7 @@ struct ReviewWindow: View {
         }
         .frame(minWidth: 760, minHeight: 440)
         .themed()
+        .environment(\.openURL, OpenURLAction { $0.isWebLink ? .systemAction : .discarded })
         // The app is menu bar only, except while this window is open: then it gets a Dock icon and ⌘-Tab.
         .onAppear {
             // `.defaultLaunchBehavior(.suppressed)` needs macOS 15, and a SceneBuilder has no
@@ -64,6 +65,14 @@ struct ReviewWindow: View {
         .onDisappear {
             NSApp.setActivationPolicy(.accessory)
         }
+    }
+}
+
+extension URL {
+    /// Agent replies and comments are other people's markdown: their links may open web pages,
+    /// never local files or other apps.
+    var isWebLink: Bool {
+        ["http", "https"].contains(scheme?.lowercased() ?? "")
     }
 }
 
