@@ -97,7 +97,6 @@ private struct ChatSuggestions: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 6) {
                 ForEach(Self.questions, id: \.self) { question in
                     Button {
@@ -106,7 +105,6 @@ private struct ChatSuggestions: View {
                     } label: {
                         Text(question)
                             .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 7)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -160,6 +158,9 @@ private struct ChatComposer: View {
                         .help("Send (↩). ⌥↩ adds a new line.")
                 }
             }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .imageScale(.large)
             .padding(8)
             .background(.background, in: .rect(cornerRadius: 8))
             .overlay {
@@ -167,9 +168,6 @@ private struct ChatComposer: View {
                     .strokeBorder(isFocused ? palette.accent : Color.secondary.opacity(0.3))
             }
         }
-        .labelStyle(.iconOnly)
-        .buttonStyle(.borderless)
-        .imageScale(.large)
         .padding(10)
         .onChange(of: review.selection) { includesSelection = true }
         // Also runs on appear, for an "Ask Agent" that opened the inspector.
