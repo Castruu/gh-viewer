@@ -22,7 +22,7 @@ struct DiffMarkdown: View {
     }
 
     static func inline(_ text: String) -> AttributedString {
-        let text = text.replacing(htmlTag, with: "")
+        let text = text.replacing(htmlTag, with: "").trimmingCharacters(in: .whitespaces)
         return (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
     }
