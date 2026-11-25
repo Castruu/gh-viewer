@@ -354,6 +354,11 @@ pub(crate) struct SubmitAttempt {
     pub drafts: Vec<DraftComment>,
 }
 
+/// Called with the submit record's path right before phase 2, so live tests can
+/// keep the files a lost answer would have left.
+#[cfg(test)]
+pub(crate) static BEFORE_PHASE_2: Mutex<Option<fn(&Path)>> = Mutex::new(None);
+
 impl GitHubClient {
     /// Submits a review in two steps: the drafts go into a pending review, which
     /// is recorded next to them, then submitted. GitHub is the source of truth,
@@ -453,6 +458,13 @@ impl GitHubClient {
         };
         // Recorded before the last step: if its answer is lost, a retry finds the review.
         store.save_attempt(repo, number, Some(&record))?;
+        #[cfg(test)]
+        {
+            let hook = *lock(&BEFORE_PHASE_2);
+            if let Some(hook) = hook {
+                hook(&store.attempt_path(repo, number)?);
+            }
+        }
         let variables = submit_pending_variables(&record.review_id, record.event, &record.body);
         let url = self
             .graphql(SUBMIT_PENDING, variables)

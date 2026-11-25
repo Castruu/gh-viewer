@@ -1106,4 +1106,620 @@ mod tests {
         tools.draft_comment(args(12, DiffSide::Right, None)).unwrap();
         assert_eq!(drafts.list("o/r".into(), 7).unwrap()[0].commit_oid, "d".repeat(40));
     }
+
+    /// Live submits. They post real reviews, so they run only on the PR named by
+    /// GHV_LIVE_SUBMIT_PR ("owner/repo#n"): one of yours that's safe to review,
+    /// with a hunk that has a removed line and three added ones, and an added line
+    /// in another hunk of that file.
+    /// `GHV_LIVE_SUBMIT_PR=o/r#1 cargo test -p ghv_core live_submit -- --ignored --nocapture`
+    /// Local files go to temp dirs. Submitted reviews stay on the PR, as GitHub
+    /// can't delete them; `h` and `i` also push a commit to the PR's branch.
+    mod live_submit {
+        use super::*;
+        use crate::checkout::DiffHunk;
+        use crate::pr::{BEFORE_PHASE_2, DraftComment, ViewedState};
+        use serde_json::{Value, json};
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+        use std::time::Duration;
+
+        /// GitHub keeps one pending review per user and PR, so scenarios take turns.
+        static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        const REVIEWS: &str = r#"
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+            reviews(first: 100) { nodes {
+              id databaseId state body url viewerDidAuthor commit { oid }
+              comments(first: 100) { nodes { path line startLine originalLine originalStartLine body } }
+            } }
+          } }
+        }"#;
+
+        /// What the browser does when you start a review on github.com.
+        const START_PENDING: &str = r#"
+        mutation($input: AddPullRequestReviewInput!) {
+          addPullRequestReview(input: $input) { pullRequestReview { id url } }
+        }"#;
+
+        /// What "Cancel review" on github.com does.
+        const DELETE_PENDING: &str = r#"
+        mutation($id: ID!) { deletePullRequestReview(input: { pullRequestReviewId: $id }) { pullRequestReview { id } } }"#;
+
+        struct Live {
+            repo: String,
+            number: u64,
+            /// The app's data dir.
+            root: tempfile::TempDir,
+            github: Arc<GitHubClient>,
+            drafts: Arc<DraftStore>,
+            hub: ReviewHub,
+        }
+
+        struct Spot {
+            path: String,
+            line: u32,
+            side: DiffSide,
+            start_line: Option<u32>,
+        }
+
+        /// Where scenarios comment, from the PR's diff.
+        struct Targets {
+            path: String,
+            removed: u32,
+            added: [u32; 3],
+            /// An added line in another hunk.
+            other: u32,
+        }
+
+        impl Targets {
+            fn of(opened: &OpenedReview) -> Self {
+                let added = |hunk: &DiffHunk| -> Vec<u32> {
+                    hunk.lines.iter().filter(|l| l.kind == LineKind::Added).filter_map(|l| l.new_line).collect()
+                };
+                for file in &opened.files {
+                    for (i, hunk) in file.hunks.iter().enumerate() {
+                        let removed = hunk.lines.iter().find(|l| l.kind == LineKind::Removed).and_then(|l| l.old_line);
+                        let other = file.hunks.iter().enumerate().filter(|(j, _)| *j != i).find_map(|(_, h)| added(h).first().copied());
+                        if let (Some(removed), [a, b, c, ..], Some(other)) = (removed, added(hunk).as_slice(), other) {
+                            return Self { path: file.path.clone(), removed, added: [*a, *b, *c], other };
+                        }
+                    }
+                }
+                panic!("the PR's diff has no hunk to comment on as these tests need");
+            }
+            fn spot(&self, line: u32, side: DiffSide, start_line: Option<u32>) -> Spot {
+                Spot { path: self.path.clone(), line, side, start_line }
+            }
+            fn single(&self) -> Spot {
+                self.spot(self.added[2], DiffSide::Right, None)
+            }
+            fn range(&self) -> Spot {
+                self.spot(self.added[1], DiffSide::Right, Some(self.added[0]))
+            }
+            fn removed(&self) -> Spot {
+                self.spot(self.removed, DiffSide::Left, None)
+            }
+            fn other(&self) -> Spot {
+                self.spot(self.other, DiffSide::Right, None)
+            }
+        }
+
+        impl Live {
+            fn new() -> Option<Self> {
+                let pr = std::env::var("GHV_LIVE_SUBMIT_PR").ok()?;
+                let (repo, number) = pr.split_once('#').expect("GHV_LIVE_SUBMIT_PR is owner/repo#n");
+                let root = tempfile::tempdir().unwrap();
+                let github = Arc::new(GitHubClient::new());
+                let (drafts, hub) = app(root.path(), &github);
+                Some(Self { repo: repo.into(), number: number.parse().unwrap(), root, github, drafts, hub })
+            }
+
+            /// A new store and hub on the same data dir, as after the app restarts.
+            fn restart(&mut self) {
+                (self.drafts, self.hub) = app(self.root.path(), &self.github);
+            }
+
+            async fn open(&self) -> OpenedReview {
+                self.hub.open(self.repo.clone(), self.number).await.unwrap()
+            }
+
+            fn add(&self, spot: Spot, body: &str, commit: &str) -> DraftComment {
+                let draft = NewDraft {
+                    path: spot.path,
+                    line: spot.line,
+                    side: spot.side,
+                    start_line: spot.start_line,
+                    start_side: spot.start_line.map(|_| spot.side),
+                    body: body.into(),
+                    author: DraftAuthor::You,
+                    commit_oid: commit.into(),
+                };
+                self.drafts.add(self.repo.clone(), self.number, draft).unwrap()
+            }
+
+            async fn submit(&self, event: ReviewEvent, body: &str, drafts: &[DraftComment]) -> Result<SubmitResult, CoreError> {
+                let ids = drafts.iter().map(|draft| draft.id.clone()).collect();
+                self.hub.submit(self.repo.clone(), self.number, event, body.into(), ids).await
+            }
+
+            /// Submits, keeping a copy of the record and drafts as they were right
+            /// before phase 2: what a lost answer would leave.
+            async fn submit_setting_aside(&self, event: ReviewEvent, body: &str, drafts: &[DraftComment]) -> SubmitResult {
+                *BEFORE_PHASE_2.lock().unwrap() = Some(set_aside);
+                let result = self.submit(event, body, drafts).await;
+                *BEFORE_PHASE_2.lock().unwrap() = None;
+                let result = result.unwrap();
+                assert_eq!(result.warning, None);
+                result
+            }
+
+            /// Puts back what `submit_setting_aside` kept and restarts, as if GitHub's answer had been lost.
+            fn lose_the_answer(&mut self) {
+                let dir = self.drafts_dir();
+                for entry in fs::read_dir(aside(&dir)).unwrap() {
+                    let entry = entry.unwrap();
+                    fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+                }
+                fs::remove_dir_all(aside(&dir)).unwrap();
+                self.restart();
+            }
+
+            fn drafts_dir(&self) -> PathBuf {
+                self.record_path().parent().unwrap().to_owned()
+            }
+
+            fn record_path(&self) -> PathBuf {
+                self.drafts.attempt_path(&self.repo, self.number).unwrap()
+            }
+
+            /// No drafts left, and no record, in memory or on disk.
+            fn assert_settled(&self) {
+                assert_eq!(self.drafts.list(self.repo.clone(), self.number).unwrap(), []);
+                assert_eq!(self.drafts.unsettled(self.repo.clone(), self.number).unwrap(), None);
+                assert!(!self.drafts_dir().join(format!("{}.json", self.number)).exists());
+                assert!(!self.record_path().exists());
+            }
+
+            async fn graphql(&self, query: &str, variables: Value) -> Value {
+                let body = self.github.graphql(query, variables).await.unwrap();
+                let mut body: Value = serde_json::from_str(&body).unwrap();
+                assert!(body.get("errors").is_none(), "{body}");
+                body["data"].take()
+            }
+
+            async fn reviews(&self) -> Vec<Value> {
+                let (owner, name) = self.repo.split_once('/').unwrap();
+                let variables = json!({ "owner": owner, "name": name, "number": self.number });
+                let mut data = self.graphql(REVIEWS, variables).await;
+                serde_json::from_value(data["repository"]["pullRequest"]["reviews"]["nodes"].take()).unwrap()
+            }
+
+            async fn submitted(&self) -> usize {
+                self.reviews().await.iter().filter(|review| review["state"] != "PENDING").count()
+            }
+
+            async fn pending(&self) -> Option<Value> {
+                self.reviews().await.into_iter().find(|review| review["state"] == "PENDING")
+            }
+
+            async fn review(&self, url: &str) -> Value {
+                for _ in 0..10 {
+                    let reviews = self.reviews().await;
+                    let review = reviews.into_iter().find(|review| review["url"] == url).unwrap_or_else(|| panic!("no review {url}"));
+                    // Right after a submit GitHub can report no commit for a moment.
+                    if !review["commit"].is_null() {
+                        return review;
+                    }
+                    eprintln!("[{url}] commit is null, reading again");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                panic!("{url} has no commit");
+            }
+
+            /// A submitted review's comments from REST, the only API that gives their
+            /// sides. The PR's list, as the review's own list leaves out lines and sides.
+            fn comments(&self, review: &Value) -> Vec<Value> {
+                let path = format!("repos/{}/pulls/{}/comments?per_page=100", self.repo, self.number);
+                let all: Vec<Value> = serde_json::from_value(gh(&["api", &path])).unwrap();
+                all.into_iter().filter(|c| c["pull_request_review_id"] == review["databaseId"]).collect()
+            }
+
+            async fn start_pending_on_github(&self, pr_id: &str, commit: &str, spot: Spot, body: &str) -> Value {
+                let thread = json!({ "path": spot.path, "line": spot.line, "side": spot.side, "body": body });
+                let input = json!({ "input": { "pullRequestId": pr_id, "commitOID": commit, "threads": [thread] } });
+                let mut data = self.graphql(START_PENDING, input).await;
+                data["addPullRequestReview"]["pullRequestReview"].take()
+            }
+
+            /// Pushes a commit that adds two lines at the top of `path`, so lines
+            /// after them move, and waits until GitHub has it as the PR's head.
+            async fn push_a_commit(&self, branch: &str, path: &str) -> String {
+                let dir = tempfile::tempdir().unwrap();
+                run(dir.path(), &["gh", "repo", "clone", &self.repo, "clone", "--", "--depth=1", "--branch", branch]);
+                let clone = dir.path().join("clone");
+                let text = fs::read_to_string(clone.join(path)).unwrap();
+                let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+                fs::write(clone.join(path), format!("// GH Viewer live test: a later push{eol}{eol}{text}")).unwrap();
+                run(&clone, &["git", "commit", "-qam", "GH Viewer live test: a later push"]);
+                run(&clone, &["git", "push", "-q", "origin", &format!("HEAD:refs/heads/{branch}")]);
+                let head = run(&clone, &["git", "rev-parse", "HEAD"]);
+                for _ in 0..30 {
+                    if gh(&["api", &format!("repos/{}/pulls/{}", self.repo, self.number)])["head"]["sha"] == head.as_str() {
+                        return head;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                panic!("GitHub didn't move the PR to {head}");
+            }
+        }
+
+        fn app(root: &Path, github: &Arc<GitHubClient>) -> (Arc<DraftStore>, ReviewHub) {
+            let root = root.to_string_lossy().into_owned();
+            let drafts = Arc::new(DraftStore::new(root.clone()));
+            let hub = ReviewHub::new(root, github.clone(), drafts.clone(), Arc::new(Recorder::default()));
+            (drafts, hub)
+        }
+
+        fn aside(dir: &Path) -> PathBuf {
+            dir.with_extension("aside")
+        }
+
+        /// `BEFORE_PHASE_2`'s hook: copies the record and the drafts next to it.
+        fn set_aside(record: &Path) {
+            let dir = record.parent().unwrap();
+            fs::create_dir_all(aside(dir)).unwrap();
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                fs::copy(entry.path(), aside(dir).join(entry.file_name())).unwrap();
+            }
+        }
+
+        fn run(dir: &Path, args: &[&str]) -> String {
+            let output = Command::new(args[0]).args(&args[1..]).current_dir(dir).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+
+        /// Runs `gh` (read-only calls only) and parses its JSON output.
+        fn gh(args: &[&str]) -> Value {
+            serde_json::from_str(&run(Path::new("."), &[&["gh"], args].concat())).unwrap()
+        }
+
+        /// Prints the evidence for the report.
+        fn show(label: &str, review: &Value, comments: &[Value]) {
+            eprintln!(
+                "[{label}] review {} ({}) {} on {} by me={} body {:?} {}",
+                review["id"], review["databaseId"], review["state"], review["commit"]["oid"], review["viewerDidAuthor"], review["body"], review["url"]
+            );
+            for c in comments {
+                eprintln!(
+                    "[{label}]   {} line {} start {} side {} start_side {} | original {} start {} | commit {} original {} | {:?}",
+                    c["path"], c["line"], c["start_line"], c["side"], c["start_side"], c["original_line"], c["original_start_line"],
+                    c["commit_id"], c["original_commit_id"], c["body"]
+                );
+            }
+        }
+
+        /// Each draft is in the review as it was drafted, in both APIs.
+        fn assert_sent(review: &Value, comments: &[Value], drafts: &[DraftComment], same_commit: bool) {
+            let nodes = review["comments"]["nodes"].as_array().unwrap();
+            for draft in drafts {
+                let body = draft.body.as_str();
+                let found: Vec<_> = comments.iter().filter(|c| c["body"] == body).collect();
+                assert_eq!(found.len(), 1, "{body}: {comments:#?}");
+                let rest = found[0];
+                assert_eq!(rest["path"], draft.path.as_str());
+                assert_eq!(rest["side"], json!(draft.side), "{body}");
+                assert_eq!(rest["start_side"], json!(draft.start_side), "{body}");
+                assert_eq!(rest["original_line"], draft.line, "{body}");
+                assert_eq!(rest["original_start_line"], json!(draft.start_line), "{body}");
+                assert_eq!(rest["original_commit_id"], draft.commit_oid.as_str(), "{body}");
+                if same_commit {
+                    assert_eq!(rest["line"], draft.line, "{body}");
+                    assert_eq!(rest["start_line"], json!(draft.start_line), "{body}");
+                }
+                let node = nodes.iter().find(|n| n["body"] == body).unwrap();
+                assert_eq!(node["originalLine"], draft.line, "{body}");
+                assert_eq!(node["originalStartLine"], json!(draft.start_line), "{body}");
+            }
+        }
+
+        /// (a) Three drafts and a summary, posted as a comment.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_a_fresh_comment() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let drafts = [
+                live.add(t.single(), "(a) one line", &head),
+                live.add(t.range(), "(a) two lines", &head),
+                live.add(t.removed(), "(a) a removed line", &head),
+            ];
+            let count = live.submitted().await;
+
+            let posted = live.submit(ReviewEvent::Comment, "(a) summary", &drafts).await.unwrap();
+            assert_eq!(posted.warning, None);
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("a", &review, &comments);
+            assert_eq!((review["state"].as_str(), review["body"].as_str()), (Some("COMMENTED"), Some("(a) summary")));
+            assert_eq!(review["commit"]["oid"], head.as_str());
+            assert_eq!(comments.len(), 3);
+            assert_sent(&review, &comments, &drafts, true);
+            assert_eq!(live.submitted().await, count + 1);
+            live.assert_settled();
+        }
+
+        /// (b) GitHub's answer to phase 2 is lost; the same submit again settles it.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_b_exact_retry_after_a_lost_answer() {
+            let Some(mut live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            // Matching a retry relies on GitHub keeping bodies as sent, apart from the ends.
+            let body = "(b) one line\n\n- `code`, é, 🚀  \n> quoted\t\n\nlast line  ";
+            let drafts = [live.add(t.single(), body, &head), live.add(t.removed(), "(b) a removed line", &head)];
+            let posted = live.submit_setting_aside(ReviewEvent::Comment, "(b) summary", &drafts).await;
+            let count = live.submitted().await;
+
+            live.lose_the_answer();
+            let unsettled = live.drafts.unsettled(live.repo.clone(), live.number).unwrap().unwrap();
+            assert_eq!(unsettled.draft_ids.len(), 2);
+            live.open().await;
+            let retry = live.submit(ReviewEvent::Comment, "(b) summary", &drafts).await.unwrap();
+            eprintln!("[b] first {} retry {:?}", posted.url, retry);
+            assert_eq!(retry, SubmitResult { url: posted.url.clone(), warning: None });
+            assert_eq!(live.submitted().await, count);
+            live.assert_settled();
+            let review = live.review(&posted.url).await;
+            show("b", &review, &live.comments(&review));
+        }
+
+        /// (c) As (b), but the retry asks for something else: it isn't sent.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_c_different_retry_after_a_lost_answer() {
+            let Some(mut live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let drafts = [live.add(t.range(), "(c) two lines", &head), live.add(t.removed(), "(c) a removed line", &head)];
+            let posted = live.submit_setting_aside(ReviewEvent::Comment, "(c) summary", &drafts).await;
+            let count = live.submitted().await;
+
+            live.lose_the_answer();
+            live.open().await;
+            let late = live.add(t.other(), "(c) drafted after", &head);
+            let all = [drafts[0].clone(), drafts[1].clone(), late.clone()];
+            let error = live.submit(ReviewEvent::Comment, "(c) another summary", &all).await.unwrap_err().to_string();
+            eprintln!("[c] error: {error}");
+            assert!(error.contains(&posted.url) && error.contains("already posted as a comment"), "{error}");
+            assert!(error.contains(&format!("Drafts not in it are still here: {}:{}.", t.path, t.other)), "{error}");
+            assert_eq!(live.drafts.list(live.repo.clone(), live.number).unwrap(), [late]);
+            assert_eq!(live.drafts.unsettled(live.repo.clone(), live.number).unwrap(), None);
+            assert_eq!(live.submitted().await, count);
+            assert_eq!(live.pending().await, None);
+            assert_eq!(live.hub.discard(live.repo.clone(), live.number).await.unwrap(), None);
+            live.assert_settled();
+        }
+
+        /// (d) A review you started on github.com gets the app's draft, and is submitted once.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_d_into_a_pending_review_from_github() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            // Unique, so earlier runs' submitted copies don't count.
+            let from_github = format!("(d) from github.com, run {}", UNIX_EPOCH.elapsed().unwrap().as_millis());
+            let browser = live.start_pending_on_github(&opened.detail.id, &head, t.other(), &from_github).await;
+            let count = live.submitted().await;
+
+            let (owner, name) = live.repo.split_once('/').unwrap();
+            let threads = live
+                .graphql(
+                    "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(last: 100) { nodes { path line diffSide comments(first: 10) { nodes { body state } } } } } } }",
+                    json!({ "owner": owner, "name": name, "number": live.number }),
+                )
+                .await;
+            let in_threads: Vec<_> = threads["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|thread| thread.to_string().contains(&from_github))
+                .collect();
+            eprintln!("[d] reviewThreads with the pending comment: {in_threads:?}");
+            let reopened = live.open().await;
+            let pending = reopened.detail.pending_review.clone().expect("the window shows the pending review");
+            assert_eq!((pending.id.as_str(), pending.comments.len()), (browser["id"].as_str().unwrap(), 1));
+            assert!(!format!("{:?}", reopened.detail.threads).contains(&from_github));
+
+            let drafts = [live.add(t.removed(), "(d) from the app", &head)];
+            let posted = live.submit(ReviewEvent::Comment, "(d) summary", &drafts).await.unwrap();
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("d", &review, &comments);
+            assert_eq!(review["id"], browser["id"]);
+            assert_eq!(review["state"], "COMMENTED");
+            let mut bodies: Vec<_> = comments.iter().map(|c| c["body"].as_str().unwrap()).collect();
+            bodies.sort();
+            assert_eq!(bodies, [from_github.as_str(), "(d) from the app"]);
+            assert_sent(&review, &comments, &drafts, true);
+            assert_eq!(live.submitted().await, count + 1);
+            live.assert_settled();
+        }
+
+        /// (e) GitHub refuses to approve your own PR; the pending review stays, and a comment resumes it.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_e_resumes_after_a_refusal() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert!(opened.detail.viewer_did_author, "approving must be refused, so the PR must be yours");
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let drafts = [live.add(t.range(), "(e) two lines", &head), live.add(t.removed(), "(e) a removed line", &head)];
+            let count = live.submitted().await;
+
+            let error = live.submit(ReviewEvent::Approve, "(e) approve", &drafts).await.unwrap_err();
+            eprintln!("[e] refusal: {error}");
+            let unsettled = live.drafts.unsettled(live.repo.clone(), live.number).unwrap().expect("the record is kept");
+            assert_eq!(unsettled.draft_ids, [drafts[0].id.clone(), drafts[1].id.clone()]);
+            let pending = live.pending().await.expect("the pending review is kept on GitHub");
+            assert_eq!(pending["url"], unsettled.review_url.as_str());
+            assert_eq!(pending["comments"]["nodes"].as_array().unwrap().len(), 2);
+            assert_eq!(live.submitted().await, count);
+
+            let posted = live.submit(ReviewEvent::Comment, "(e) a comment instead", &drafts).await.unwrap();
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("e", &review, &comments);
+            assert_eq!(review["id"], pending["id"]);
+            assert_eq!((review["state"].as_str(), review["body"].as_str()), (Some("COMMENTED"), Some("(e) a comment instead")));
+            assert_eq!(comments.len(), 2);
+            assert_sent(&review, &comments, &drafts, true);
+            assert_eq!(live.submitted().await, count + 1);
+            live.assert_settled();
+        }
+
+        /// (f) The recorded pending review is deleted on github.com; the next submit starts over.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "posts a review on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_f_after_the_pending_review_was_deleted() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, head) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let drafts = [live.add(t.single(), "(f) one line", &head)];
+            live.submit(ReviewEvent::Approve, "(f) approve", &drafts).await.unwrap_err();
+            let pending = live.pending().await.expect("the refused review is pending");
+            assert!(live.drafts.unsettled(live.repo.clone(), live.number).unwrap().is_some());
+
+            let id = pending["id"].as_str().unwrap();
+            live.graphql(DELETE_PENDING, json!({ "id": id })).await;
+            let raw = live
+                .github
+                .graphql("query($id: ID!) { node(id: $id) { ... on PullRequestReview { state url } } }", json!({ "id": id }))
+                .await
+                .unwrap();
+            eprintln!("[f] a deleted review: {raw}");
+            let gone = live.github.remote_review(id).await;
+            assert!(matches!(gone, Ok(None)), "{gone:?}");
+
+            let posted = live.submit(ReviewEvent::Comment, "(f) after the delete", &drafts).await.unwrap();
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("f", &review, &comments);
+            assert_ne!(review["id"], pending["id"]);
+            assert_eq!(review["state"], "COMMENTED");
+            assert_eq!(comments.len(), 1);
+            assert_sent(&review, &comments, &drafts, true);
+            live.assert_settled();
+        }
+
+        /// (g) The Viewed checkbox, both ways.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "changes Viewed on GHV_LIVE_SUBMIT_PR"]
+        async fn live_submit_g_viewed() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            let path = Targets::of(&opened).path;
+            for (viewed, state) in [(true, ViewedState::Viewed), (false, ViewedState::Unviewed)] {
+                live.github.set_file_viewed(opened.detail.id.clone(), path.clone(), viewed).await.unwrap();
+                let detail = live.github.fetch_pull_request(live.repo.clone(), live.number).await.unwrap();
+                let file = detail.files.iter().find(|file| file.path == path).unwrap();
+                eprintln!("[g] set {viewed}: viewerViewedState {:?}", file.viewed);
+                assert_eq!(file.viewed, state);
+            }
+        }
+
+        /// (h) Drafts keep the diff on their commit after a push, and are posted on it,
+        /// even after a lost answer, matched on their original lines.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "pushes a commit to GHV_LIVE_SUBMIT_PR and posts a review on it"]
+        async fn live_submit_h_pinned_to_an_older_commit() {
+            let Some(mut live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, old) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let drafts = [live.add(t.single(), "(h) one line", &old), live.add(t.removed(), "(h) a removed line", &old)];
+            let new = live.push_a_commit(&opened.detail.head_ref_name, &t.path).await;
+
+            let pinned = live.open().await;
+            eprintln!("[h] pushed {new}; checkout {} latest {}", pinned.checkout.head_oid, pinned.checkout.latest_head_oid);
+            assert_eq!((pinned.checkout.head_oid.as_str(), pinned.checkout.latest_head_oid.as_str()), (old.as_str(), new.as_str()));
+            assert_eq!(pinned.detail.head_oid, new);
+            assert_eq!(pinned.files, opened.files);
+            let posted = live.submit_setting_aside(ReviewEvent::Comment, "(h) on the older commit", &drafts).await;
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("h", &review, &comments);
+            assert_eq!(review["commit"]["oid"], old.as_str());
+            assert_eq!(comments.len(), 2);
+            assert_sent(&review, &comments, &drafts, false);
+            let count = live.submitted().await;
+
+            live.lose_the_answer();
+            assert_eq!(live.open().await.checkout.head_oid, old);
+            let retry = live.submit(ReviewEvent::Comment, "(h) on the older commit", &drafts).await.unwrap();
+            assert_eq!(retry, SubmitResult { url: posted.url.clone(), warning: None });
+            assert_eq!(live.submitted().await, count);
+            live.assert_settled();
+            let moved = live.open().await;
+            assert_eq!((moved.checkout.head_oid.as_str(), moved.checkout.latest_head_oid.as_str()), (new.as_str(), new.as_str()));
+        }
+
+        /// (i) GitHub adds threads to a pending review on the PR's head, whatever the
+        /// review's commit. So drafts on an older commit aren't added to a github.com
+        /// pending review there; once it's gone, they're posted on their own commit.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "pushes a commit to GHV_LIVE_SUBMIT_PR and posts a review on it"]
+        async fn live_submit_i_into_a_pending_review_on_an_older_commit() {
+            let Some(live) = Live::new() else { return };
+            let _turn = ONE_AT_A_TIME.lock().await;
+            let opened = live.open().await;
+            assert_eq!(live.pending().await, None);
+            let (t, old) = (Targets::of(&opened), opened.checkout.head_oid.clone());
+            let browser = live.start_pending_on_github(&opened.detail.id, &old, t.other(), "(i) from github.com").await;
+            let drafts = [live.add(t.range(), "(i) two lines", &old), live.add(t.removed(), "(i) a removed line", &old)];
+            let new = live.push_a_commit(&opened.detail.head_ref_name, &t.path).await;
+
+            let pinned = live.open().await;
+            assert_eq!((pinned.checkout.head_oid.as_str(), pinned.checkout.latest_head_oid.as_str()), (old.as_str(), new.as_str()));
+            assert_eq!(pinned.detail.pending_review.as_ref().map(|p| p.commit_oid.as_str()), Some(old.as_str()));
+            let error = live.submit(ReviewEvent::Comment, "(i) on the older commit", &drafts).await.unwrap_err().to_string();
+            eprintln!("[i] error: {error}");
+            assert!(error.contains(browser["url"].as_str().unwrap()), "{error}");
+            let pending = live.pending().await.unwrap();
+            assert_eq!((&pending["id"], pending["comments"]["nodes"].as_array().unwrap().len()), (&browser["id"], 1));
+            assert_eq!(live.drafts.list(live.repo.clone(), live.number).unwrap().len(), 2);
+            assert_eq!(live.drafts.unsettled(live.repo.clone(), live.number).unwrap(), None);
+
+            // The reviewer deletes it on github.com, as the error says.
+            live.graphql(DELETE_PENDING, json!({ "id": browser["id"] })).await;
+            let posted = live.submit(ReviewEvent::Comment, "(i) on the older commit", &drafts).await.unwrap();
+            let review = live.review(&posted.url).await;
+            let comments = live.comments(&review);
+            show("i", &review, &comments);
+            assert_eq!(review["commit"]["oid"], old.as_str());
+            assert_eq!(comments.len(), 2);
+            assert_sent(&review, &comments, &drafts, false);
+            live.assert_settled();
+        }
+    }
 }
