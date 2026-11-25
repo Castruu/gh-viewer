@@ -58,6 +58,13 @@ struct DiffPane: View {
             submit: { if review.opened != nil { isSubmitPresented = true } }))
     }
 
+    private var fileTreeToggle: some View {
+        Button("Files", systemImage: "sidebar.left") { showsFiles.toggle() }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help(showsFiles ? "Hide the file tree (⇧⌘F)" : "Show the file tree (⇧⌘F)")
+    }
+
     private var shownFiles: [DiffFileModel] {
         review.shown(files, path: \.id)
     }
@@ -66,10 +73,31 @@ struct DiffPane: View {
         VStack(spacing: 0) {
             banners
             HStack(spacing: 0) {
+                // The tree's own button folds it to a thin strip, and the strip's button brings it back.
                 if showsFiles {
-                    DiffFileList(review: review)
-                        .frame(width: fileListWidth)
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("Files")
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            fileTreeToggle
+                        }
+                        .padding(.leading, 12)
+                        .padding(.trailing, 8)
+                        .padding(.vertical, 8)
+                        DiffFileList(review: review)
+                    }
+                    .frame(width: fileListWidth)
                     DiffSplitDivider(width: $fileListWidth, range: 180...480)
+                } else {
+                    VStack {
+                        fileTreeToggle
+                        Spacer()
+                    }
+                    .padding(.top, 8)
+                    .frame(width: 30)
+                    Divider()
                 }
                 VStack(spacing: 0) {
                     DiffSummaryBar(review: review, files: shownFiles, isSubmitPresented: $isSubmitPresented)

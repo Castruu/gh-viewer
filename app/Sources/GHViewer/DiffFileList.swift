@@ -9,8 +9,9 @@ struct DiffFileList: View {
     /// The sidebar's filter: leave out the files already checked as viewed.
     @AppStorage("sidebarHidesViewedFiles") private var hidesViewed = false
     @State private var selection: String?
-    /// Folder paths, each ending in "/".
-    @State private var collapsed: Set<String> = []
+    /// The folders that are open, by path ending in "/". They start closed: a big PR is
+    /// easier to take in as a few folders than as every file at once.
+    @State private var open: Set<String> = []
     private static let indent: CGFloat = 12
 
     var body: some View {
@@ -20,9 +21,8 @@ struct DiffFileList: View {
             let byPath = Dictionary(files.map { ($0.path, $0) }) { first, _ in first }
             // The tree is rebuilt on each redraw, which is nothing for hundreds of files; cache it if a PR with thousands drags.
             let paths = review.shown(files, path: \.path).map(\.path)
-            let rows = fileTree(of: paths.filter { !hidesViewed || !viewed.contains($0) }).filter { row in
-                !collapsed.contains { row.path.hasPrefix($0) && row.path != $0 }
-            }
+            let tree = fileTree(of: paths.filter { !hidesViewed || !viewed.contains($0) })
+            let rows = Self.visible(tree, open: open)
             List(rows, selection: Binding(get: { selection }, set: { path in
                 selection = path
                 if let path { review.scrollRequest = DiffScrollRequest(path: path) }
@@ -30,20 +30,26 @@ struct DiffFileList: View {
                 switch row {
                 case .folder(let path, let name, let depth):
                     Button {
-                        collapsed.formSymmetricDifference([path])
+                        open.formSymmetricDifference([path])
                     } label: {
-                        Label(name, systemImage: collapsed.contains(path) ? "folder.fill" : "folder")
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                                .rotationEffect(.degrees(open.contains(path) ? 90 : 0))
+                                .frame(width: 10)
+                            Label(name, systemImage: "folder")
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, CGFloat(depth) * Self.indent)
                     .selectionDisabled()
                     .listRowSeparator(.hidden)
-                    .help(collapsed.contains(path) ? "Show the files in \(path)" : "Hide the files in \(path)")
+                    .help(open.contains(path) ? "Hide the files in \(path)" : "Show the files in \(path)")
                 case .file(let path, let depth):
                     if let file = byPath[path] {
                         DiffFileRow(file: file, draftCount: draftCounts[path] ?? 0, isViewed: viewed.contains(path))
@@ -63,6 +69,18 @@ struct DiffFileList: View {
         } else {
             ContentUnavailableView("No Files Yet", systemImage: "doc.on.doc",
                                    description: Text("They show once the pull request has loaded."))
+        }
+    }
+}
+
+extension DiffFileList {
+    /// The rows to draw: those whose folders, all the way up, are open.
+    static func visible(_ tree: [FileTreeRow], open: Set<String>) -> [FileTreeRow] {
+        let folders = tree.compactMap { row in
+            if case .folder(let path, _, _) = row { path } else { nil }
+        }
+        return tree.filter { row in
+            folders.allSatisfy { !row.path.hasPrefix($0) || row.path == $0 || open.contains($0) }
         }
     }
 }

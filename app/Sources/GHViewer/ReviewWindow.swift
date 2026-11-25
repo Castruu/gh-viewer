@@ -14,7 +14,6 @@ struct ReviewWindow: View {
     /// Open from the start: the agent is the point of the app. Closing it is remembered.
     @AppStorage("showsChat") private var showsChat = true
     @State private var isChatPresented = false
-    @AppStorage(DiffFileList.showsKey) private var showsFiles = true
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
@@ -37,12 +36,6 @@ struct ReviewWindow: View {
         .toolbar {
             ToolbarItem {
                 RefreshButton(model: model)
-            }
-            ToolbarItem {
-                Toggle(isOn: $showsFiles) {
-                    Label("Files", systemImage: "list.bullet.indent")
-                }
-                .help(showsFiles ? "Hide the file tree (⇧⌘F)" : "Show the file tree (⇧⌘F)")
             }
             ToolbarItem {
                 Button {
