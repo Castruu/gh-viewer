@@ -694,9 +694,12 @@ fn launch_adapter(
             })?;
         // AcpAgent runs the adapter in its own process group and kills the
         // group on drop, so the node process behind npx doesn't outlive us.
+        let mut env = env.clone();
+        // Set when the app was started from inside a Claude Code session; Claude Code reads it as "nested".
+        env.remove("CLAUDECODE");
         let config = AcpAgentConfig::new(npx)
             .args(["-y", kind.package()])
-            .envs(env.clone());
+            .envs(env);
         let agent = AcpAgent::new(config).with_debug(move |line, direction| {
             if direction == LineDirection::Stderr {
                 stderr.push(line);
