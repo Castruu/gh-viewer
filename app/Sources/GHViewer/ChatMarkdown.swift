@@ -144,23 +144,78 @@ private struct ChatTable: View {
 
     var body: some View {
         let columns = rows.map(\.count).max() ?? 0
-        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+        ChatTableLayout(columns: columns) {
             ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { column in
-                        Text(ChatMarkdown.inline(column < row.count ? row[column] : ""))
-                            .fontWeight(index == 0 ? .semibold : nil)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                if index == 0 {
-                    Divider()
+                ForEach(0..<columns, id: \.self) { column in
+                    Text(ChatMarkdown.inline(column < row.count ? row[column] : ""))
+                        .fontWeight(index == 0 ? .semibold : nil)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .overlay(alignment: .bottom) {
+                            if index == 0 {
+                                Divider()
+                            }
+                        }
                 }
             }
         }
         .textSelection(.enabled)
-        .padding(8)
+        .padding(4)
         .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 6))
+    }
+}
+
+/// Places cells row by row in columns that share the offered width. A column narrower
+/// than an equal share keeps its one-line width; the wider ones split the rest and wrap.
+/// `Grid` instead grows past the pane when cells hold long text.
+private struct ChatTableLayout: Layout {
+    let columns: Int
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let widths = columnWidths(proposal.width, subviews)
+        return CGSize(width: widths.reduce(0, +), height: rowHeights(widths, subviews).reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let widths = columnWidths(bounds.width, subviews)
+        let heights = rowHeights(widths, subviews)
+        var y = bounds.minY
+        for (row, height) in heights.enumerated() {
+            var x = bounds.minX
+            for column in 0..<columns {
+                subviews[row * columns + column].place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                                                       proposal: ProposedViewSize(width: widths[column], height: height))
+                x += widths[column]
+            }
+            y += height
+        }
+    }
+
+    private func columnWidths(_ available: CGFloat?, _ subviews: Subviews) -> [CGFloat] {
+        guard columns > 0 else { return [] }
+        var ideal = [CGFloat](repeating: 0, count: columns)
+        for (index, cell) in subviews.enumerated() {
+            ideal[index % columns] = max(ideal[index % columns], cell.sizeThatFits(.unspecified).width)
+        }
+        guard let available, ideal.reduce(0, +) > available else { return ideal }
+        // The widest columns share what the narrow ones leave, as in a browser's automatic table layout.
+        var room = available
+        var shared = ideal.count
+        for width in ideal.sorted() where width <= room / CGFloat(shared) {
+            room -= width
+            shared -= 1
+        }
+        let cap = room / CGFloat(max(shared, 1))
+        return ideal.map { min($0, cap) }
+    }
+
+    private func rowHeights(_ widths: [CGFloat], _ subviews: Subviews) -> [CGFloat] {
+        stride(from: 0, to: subviews.count - columns + 1, by: max(columns, 1)).map { start in
+            (0..<columns).map { column in
+                subviews[start + column].sizeThatFits(ProposedViewSize(width: widths[column], height: nil)).height
+            }.max() ?? 0
+        }
     }
 }
 
