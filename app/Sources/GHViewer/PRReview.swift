@@ -52,6 +52,13 @@ final class PRReview {
         return checkout.headOid != checkout.latestHeadOid
     }
 
+    /// True while a reload runs over a diff already shown. Drafting waits: the reload may move the diff to another commit.
+    var isReloading: Bool {
+        loadState == .loading && opened != nil
+    }
+
+    static let reloadingHelp = "Wait for the reload to finish; the diff may move to another commit"
+
     // MARK: Loading
 
     /// Fetches the PR, updates its checkout and diffs it. The first open of a repo clones it.
@@ -105,7 +112,7 @@ final class PRReview {
     /// False if it failed, with the reason in `actionError`; the same goes for the other draft actions.
     @discardableResult
     func addDraft(on selection: Selection, body: String) -> Bool {
-        guard let commit = opened?.checkout.headOid else { return false }
+        guard !isReloading, let commit = opened?.checkout.headOid else { return false }
         let single = selection.startLine == selection.line && selection.startSide == selection.side
         let draft = NewDraft(
             path: selection.path,

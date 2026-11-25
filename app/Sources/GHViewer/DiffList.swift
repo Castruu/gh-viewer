@@ -367,8 +367,9 @@ struct DiffSelectionBar: View {
             Button(action: comment) {
                 Label("Comment", systemImage: "text.bubble")
             }
-            .disabled(!canComment)
-            .help(canComment ? "Draft a review comment on the selected lines" : "Finish the open comment first")
+            .disabled(!canComment || review.isReloading)
+            .help(review.isReloading ? PRReview.reloadingHelp
+                  : canComment ? "Draft a review comment on the selected lines" : "Finish the open comment first")
             Divider().frame(height: 12)
             Button {
                 review.chatFocusRequest = UUID()

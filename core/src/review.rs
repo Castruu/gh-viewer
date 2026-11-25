@@ -91,16 +91,25 @@ impl ReviewHub {
     pub async fn open(&self, repo: String, number: u64) -> Result<OpenedReview, CoreError> {
         let mut detail = self.github.fetch_pull_request(repo.clone(), number).await?;
         let pin = self.drafts.pinned_commit(repo.clone(), number)?;
-        let checkout = self
+        let mut checkout = self
             .checkouts
-            .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin)
+            .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin.clone())
             .await?;
         // A push between the two reads leaves thread positions on another commit.
         // If it persists, the diff lists threads by file instead of inline.
         if detail.head_oid != checkout.latest_head_oid {
             detail = self.github.fetch_pull_request(repo.clone(), number).await?;
         }
-        let files = self.checkouts.diff(checkout.clone()).await?;
+        let mut files = self.checkouts.diff(checkout.clone()).await?;
+        // A draft made meanwhile, e.g. by an agent on the diff still shown, pins the PR to that commit.
+        let pinned = self.drafts.pinned_commit(repo.clone(), number)?;
+        if pinned != pin {
+            checkout = self
+                .checkouts
+                .prepare(repo.clone(), number, detail.base_ref_name.clone(), pinned)
+                .await?;
+            files = self.checkouts.diff(checkout.clone()).await?;
+        }
         let review = OpenedReview { detail, checkout, files };
 
         let mut reviews = self.reviews.lock().unwrap();

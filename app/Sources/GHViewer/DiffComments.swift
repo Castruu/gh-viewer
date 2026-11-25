@@ -34,7 +34,8 @@ struct DiffLineComments: View {
                 }
             }
             if let composing {
-                DiffCommentEditor(initialText: "", submitLabel: "Comment") { body in
+                DiffCommentEditor(initialText: "", submitLabel: "Comment",
+                                  blockedReason: review.isReloading ? PRReview.reloadingHelp : nil) { body in
                     if review.addDraft(on: composing, body: body) {
                         editor = nil
                         review.selection = nil
@@ -229,14 +230,18 @@ struct DiffDraftCard: View {
 /// Inline editor for a new comment or a draft. ⌘↩ submits and Esc cancels.
 struct DiffCommentEditor: View {
     let submitLabel: String
+    /// Set while submitting isn't possible, e.g. during a reload; the text stays.
+    let blockedReason: String?
     let submit: (String) -> Void
     let cancel: () -> Void
     @State private var text: String
     @FocusState private var isFocused: Bool
     @State private var escapeMonitor: Any?
 
-    init(initialText: String, submitLabel: String, submit: @escaping (String) -> Void, cancel: @escaping () -> Void) {
+    init(initialText: String, submitLabel: String, blockedReason: String? = nil,
+         submit: @escaping (String) -> Void, cancel: @escaping () -> Void) {
         self.submitLabel = submitLabel
+        self.blockedReason = blockedReason
         self.submit = submit
         self.cancel = cancel
         _text = State(initialValue: initialText)
@@ -271,8 +276,8 @@ struct DiffCommentEditor: View {
                     Button(submitLabel, action: send)
                         .keyboardShortcut(isFocused ? KeyboardShortcut(.return, modifiers: .command) : nil)
                         .buttonStyle(.borderedProminent)
-                        .disabled(trimmed.isEmpty)
-                        .help("\(submitLabel) (⌘↩). Stays a local draft until you submit the review")
+                        .disabled(trimmed.isEmpty || blockedReason != nil)
+                        .help(blockedReason ?? "\(submitLabel) (⌘↩). Stays a local draft until you submit the review")
                 }
                 .controlSize(.small)
             }
