@@ -185,14 +185,14 @@ struct DiffLineRow: View {
             }
             .foregroundStyle(.secondary)
             .padding(.trailing, 4)
-            .background(isSelected ? palette.accent.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.gutterOpacity))
+            .background(isSelected ? palette.selection.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.gutterOpacity))
             Text(verbatim: marker + line.text)
                 .padding(.leading, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(DiffStyle.font)
         .padding(.vertical, 1)
-        .background(isSelected ? palette.accent.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.rowOpacity))
+        .background(isSelected ? palette.selection.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.rowOpacity))
         .contentShape(Rectangle())
     }
 
@@ -343,3 +343,5 @@ struct DiffSelectionBar: View {
         .padding(.trailing, 8)
     }
 }
+    @Environment(\.palette) private var palette
+        .tint(palette.selection)
