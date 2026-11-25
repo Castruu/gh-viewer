@@ -240,43 +240,21 @@ impl CheckoutManager {
         };
         let checkout_error =
             || remote_error(&repo, format!("Couldn't check out PR #{number} of {repo}"));
-        match current {
-            // Already there: keep whatever the agent changed.
-            Some(oid) if oid.trim() == head_oid => {}
-            // Local edits are discarded on purpose: the worktree is the agent's scratch
-            // space. No `git clean`, so untracked build caches survive.
-            Some(_) => {
-                git(&[
-                    "-C", wt, "checkout", "--quiet", "--force", "--detach", &head_oid,
-                ])
+        if current.is_none() {
+            if Path::new(wt).exists() {
+                remove_dir(wt).await?;
+            }
+            // Forget worktrees whose directories are gone, or `add` refuses the path.
+            git(&["-C", &paths.bare, "worktree", "prune"])
+                .await
+                .map_err(|e| CoreError::Git(format!("Couldn't prune worktrees of {repo}: {e}")))?;
+            // No checkout yet: the sparse patterns come first.
+            git(&["-C", &paths.bare, "worktree", "add", "--quiet", "--no-checkout", "--detach", wt, &head_oid])
                 .await
                 .map_err(checkout_error())?;
-            }
-            None => {
-                if Path::new(wt).exists() {
-                    remove_dir(wt).await?;
-                }
-                // Forget worktrees whose directories are gone, or `add` refuses the path.
-                git(&["-C", &paths.bare, "worktree", "prune"])
-                    .await
-                    .map_err(|e| {
-                        CoreError::Git(format!("Couldn't prune worktrees of {repo}: {e}"))
-                    })?;
-                git(&[
-                    "-C",
-                    &paths.bare,
-                    "worktree",
-                    "add",
-                    "--quiet",
-                    "--detach",
-                    wt,
-                    &head_oid,
-                ])
-                .await
-                .map_err(checkout_error())?;
-            }
         }
-        // On every prepare, so worktrees made before this lose them too.
+        // Before any checkout, so the paths it excludes never exist on disk. On every
+        // prepare, so worktrees made before this lose them too.
         if let Err(error) = hide_agent_config(wt).await {
             let version = git(&["--version"]).await.unwrap_or_default();
             return Err(match too_old_for_sparse(&version) {
@@ -288,6 +266,14 @@ impl CheckoutManager {
                 )),
                 None => checkout_error()(error),
             });
+        }
+        // Already at the head: keep whatever the agent changed. Otherwise local edits
+        // are discarded on purpose: the worktree is the agent's scratch space. No
+        // `git clean`, so untracked build caches survive.
+        if current.as_deref().map(str::trim) != Some(head_oid.as_str()) {
+            git(&["-C", wt, "checkout", "--quiet", "--force", "--detach", &head_oid])
+                .await
+                .map_err(checkout_error())?;
         }
 
         Ok(Checkout {
@@ -1149,6 +1135,16 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
                 assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
             }
         }
+
+        // A worktree deleted by hand is made again: no checkout before the patterns,
+        // so the excluded paths are never written.
+        let wt = format!("{tmp}/data/worktrees/octo/demo/2");
+        std::fs::remove_dir_all(&wt).unwrap();
+        manager.prepare("octo/demo".into(), 2, "main".into(), None).await.unwrap();
+        for hidden in [".codex", ".claude", ".mcp.json"] {
+            assert!(std::fs::symlink_metadata(format!("{wt}/{hidden}")).is_err(), "{hidden}");
+        }
+        assert_eq!(read(&wt, "cfg/config.toml"), "[mcp_servers.x]\n");
     }
 
     #[test]
