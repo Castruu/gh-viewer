@@ -25,6 +25,14 @@ query($owner: String!, $name: String!, $number: Int!,
       id title body url isDraft viewerDidAuthor baseRefName headRefName headRefOid
       author { login }
       ...pendingReviews
+      # Submitted reviews, oldest first; yours are picked out by viewerDidAuthor.
+      lastReviews: reviews(last: 30, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+        nodes { viewerDidAuthor commit { oid } }
+      }
+      commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 50) { nodes {
+        ... on CheckRun { name conclusion detailsUrl }
+        ... on StatusContext { context state targetUrl }
+      } } } } } }
       # GitHub caps this connection at 3000 files.
       files(first: 100, after: $filesAfter) @include(if: $withFiles) {
         pageInfo { hasNextPage endCursor }
@@ -140,6 +148,17 @@ pub struct PullRequestDetail {
     /// A review you started on github.com and haven't submitted. Submitting
     /// adds your drafts to it and submits it.
     pub pending_review: Option<PendingReview>,
+    /// The head commit's checks that failed, for saying which instead of only "checks failing".
+    pub failed_checks: Vec<FailedCheck>,
+    /// The commit of the last review you submitted, if any.
+    pub last_reviewed_oid: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FailedCheck {
+    pub name: String,
+    /// Its page on GitHub or at the CI provider, if it has one.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -1238,6 +1257,8 @@ fn parse_pr_page(body: &str, repo: &str, number: u64) -> Result<PrPage, CoreErro
                 .filter_map(|thread| convert_thread(thread).transpose())
                 .collect::<Result<_, _>>()?,
             pending_review: viewer_pending_review(node.reviews),
+            failed_checks: failed_checks(node.commits),
+            last_reviewed_oid: last_reviewed_oid(node.last_reviews),
         },
         files_after,
         threads_after,
@@ -1384,6 +1405,81 @@ struct PrNode {
     #[serde(default)]
     review_threads: Option<Connection<ThreadNode>>,
     reviews: Option<Connection<ReviewNode>>,
+    #[serde(default)]
+    last_reviews: Option<OptionalNodes<MyReviewNode>>,
+    #[serde(default)]
+    commits: Option<OptionalNodes<ChecksCommitNode>>,
+}
+
+/// A connection whose nodes GitHub may return as null.
+#[derive(Deserialize)]
+struct OptionalNodes<T> {
+    nodes: Vec<Option<T>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MyReviewNode {
+    viewer_did_author: bool,
+    commit: Option<MyReviewCommit>,
+}
+
+#[derive(Deserialize)]
+struct MyReviewCommit {
+    oid: String,
+}
+
+#[derive(Deserialize)]
+struct ChecksCommitNode {
+    commit: ChecksCommit,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChecksCommit {
+    status_check_rollup: Option<ChecksRollup>,
+}
+
+#[derive(Deserialize)]
+struct ChecksRollup {
+    contexts: OptionalNodes<CheckContext>,
+}
+
+/// A check run or a commit status; each fills in its own half.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckContext {
+    name: Option<String>,
+    conclusion: Option<String>,
+    details_url: Option<String>,
+    context: Option<String>,
+    state: Option<String>,
+    target_url: Option<String>,
+}
+
+fn failed_checks(commits: Option<OptionalNodes<ChecksCommitNode>>) -> Vec<FailedCheck> {
+    let contexts = commits
+        .and_then(|commits| commits.nodes.into_iter().flatten().next())
+        .and_then(|node| node.commit.status_check_rollup)
+        .map(|rollup| rollup.contexts.nodes)
+        .unwrap_or_default();
+    contexts
+        .into_iter()
+        .flatten()
+        .filter_map(|check| {
+            let failed = matches!(
+                check.conclusion.as_deref(),
+                Some("FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED")
+            ) || matches!(check.state.as_deref(), Some("FAILURE" | "ERROR"));
+            let name = check.name.or(check.context)?;
+            failed.then_some(FailedCheck { name, url: check.details_url.or(check.target_url) })
+        })
+        .collect()
+}
+
+fn last_reviewed_oid(reviews: Option<OptionalNodes<MyReviewNode>>) -> Option<String> {
+    let mine = reviews?.nodes.into_iter().flatten().filter(|review| review.viewer_did_author).last()?;
+    mine.commit.map(|commit| commit.oid)
 }
 
 #[derive(Deserialize)]
@@ -1822,6 +1918,36 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_failed_checks_and_finds_your_last_review() {
+        let commits: OptionalNodes<ChecksCommitNode> = serde_json::from_value(serde_json::json!({ "nodes": [{ "commit": {
+            "statusCheckRollup": { "contexts": { "nodes": [
+                { "name": "test", "conclusion": "FAILURE", "detailsUrl": "https://ci.example/1" },
+                { "name": "lint", "conclusion": "SUCCESS", "detailsUrl": "https://ci.example/2" },
+                { "context": "deploy/preview", "state": "ERROR", "targetUrl": null },
+                null,
+            ] } }
+        } }] }))
+        .unwrap();
+        assert_eq!(
+            failed_checks(Some(commits)),
+            vec![
+                FailedCheck { name: "test".into(), url: Some("https://ci.example/1".into()) },
+                FailedCheck { name: "deploy/preview".into(), url: None },
+            ]
+        );
+        assert_eq!(failed_checks(None), vec![]);
+
+        let reviews: OptionalNodes<MyReviewNode> = serde_json::from_value(serde_json::json!({ "nodes": [
+            { "viewerDidAuthor": true, "commit": { "oid": "old" } },
+            { "viewerDidAuthor": true, "commit": { "oid": "mine" } },
+            { "viewerDidAuthor": false, "commit": { "oid": "theirs" } },
+        ] }))
+        .unwrap();
+        assert_eq!(last_reviewed_oid(Some(reviews)), Some("mine".into()));
+        assert_eq!(last_reviewed_oid(None), None);
+    }
     use std::time::Duration;
 
     /// Shaped like a real first page: three files (more pending), an outdated

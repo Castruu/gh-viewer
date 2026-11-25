@@ -31,10 +31,15 @@ struct DiffFileModel: Identifiable {
     var isLarge: Bool { lineCount > Self.largeLineCount }
     /// Lockfiles, generated code and data dumps: files a reviewer skims at most, so they start collapsed.
     var isNoise: Bool {
-        file.path.isGeneratedOrLockFile || (file.path.isDataFile && lineCount > Self.largeDataLineCount)
+        file.path.isGeneratedOrLockFile
+            || (file.path.isDataFile && (lineCount > Self.largeDataLineCount || longestLine > Self.longDataLine))
     }
     /// A small fixture is worth reading; a long data file isn't.
     static let largeDataLineCount = 200
+    /// One endless line is a blob, such as an image embedded in an SVG.
+    static let longDataLine = 2000
+    /// In UTF-8 bytes.
+    let longestLine: Int
 
     /// `index` is the file's place in the diff, which keeps its row ids apart from other files'.
     init(_ file: DiffFile, index: Int) {
@@ -43,6 +48,7 @@ struct DiffFileModel: Identifiable {
         var positions: [DiffAnchor: Int] = [:]
         var additions = 0, deletions = 0
         var largest: UInt32 = 0
+        var longestLine = 0
         for hunk in file.hunks {
             rows.append(DiffRow(id: index << 32 | rows.count, position: rows.count, kind: .hunk(hunk.header)))
             for line in hunk.lines {
@@ -54,6 +60,7 @@ struct DiffFileModel: Identifiable {
                 case .context: break
                 }
                 largest = max(largest, line.oldLine ?? 0, line.newLine ?? 0)
+                longestLine = max(longestLine, line.text.utf8.count)
             }
         }
         // Pair each run of removed lines with the run of added lines right after it, line for line.
@@ -80,6 +87,7 @@ struct DiffFileModel: Identifiable {
             if row == firstRemoved { row += 1 }
         }
         self.emphasis = emphasis
+        self.longestLine = longestLine
         self.rows = rows
         self.positions = positions
         self.additions = additions

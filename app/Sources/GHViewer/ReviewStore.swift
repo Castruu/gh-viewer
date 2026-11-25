@@ -54,6 +54,16 @@ final class ReviewStore {
         agentPRs.remove(review.url)
     }
 
+    /// PRs whose diff stays in memory. A big diff is tens of megabytes, and a day of reviewing opens many.
+    static let maxLoadedPRs = 6
+    private var loadedPRs = RecentlyUsed()
+
+    /// Called when `review` is shown or fetched ahead. Unloads the least recently used beyond `maxLoadedPRs`.
+    func used(_ review: PRReview) {
+        loadedPRs.use(review.url)
+        loadedPRs.trim(limit: Self.maxLoadedPRs) { _ in true }.forEach { reviews[$0]?.unloadIfIdle() }
+    }
+
     /// The review for a PR, created on first use. Keyed by URL like the sidebar.
     func review(for pullRequest: PullRequest) -> PRReview {
         if let review = reviews[pullRequest.url] {

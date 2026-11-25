@@ -24,6 +24,9 @@ pub struct OpenedReview {
     pub detail: PullRequestDetail,
     pub checkout: Checkout,
     pub files: Vec<DiffFile>,
+    /// Paths changed since the last review you submitted. `None` if you haven't
+    /// reviewed, or that commit is gone.
+    pub changed_since_review: Option<Vec<String>>,
 }
 
 /// A range of diff lines in one file, from (`start_side`, `start_line`) to
@@ -115,6 +118,16 @@ impl ReviewHub {
         }
         opened
     }
+    /// Forgets a PR's diff to free its memory; `open` brings it back. Does nothing
+    /// while an agent session is on the PR, since the session reads it.
+    pub fn close(&self, repo: String, number: u64) {
+        let key = (repo, number);
+        let sessions = self.sessions.lock().unwrap();
+        if !sessions.values().any(|info| info.key == key) {
+            self.reviews.lock().unwrap().remove(&key);
+        }
+    }
+
     /// Starts an agent session in the PR's worktree, with the app's MCP tools
     /// for that PR. The PR must have been opened first.
     pub async fn start_agent(&self, kind: AgentKind, repo: String, number: u64) -> Result<String, CoreError> {
@@ -273,7 +286,11 @@ impl ReviewHub {
                 detail = self.github.fetch_pull_request(repo.clone(), number).await?;
             }
             let files = self.checkouts.diff(checkout.clone()).await?;
-            let review = OpenedReview { detail: detail.clone(), checkout, files };
+            let changed_since_review = match &detail.last_reviewed_oid {
+                Some(oid) => self.checkouts.changed_since(&checkout, oid).await,
+                None => None,
+            };
+            let review = OpenedReview { detail: detail.clone(), checkout, files, changed_since_review };
 
             let mut reviews = self.reviews.lock().unwrap();
             let shared = reviews.get(&(repo.clone(), number)).cloned();
@@ -598,7 +615,7 @@ fn build_prompt(review: &OpenedReview, include_pr: bool, selection: Option<&Sele
         );
         let _ = writeln!(
             text,
-            "\nYou have GH Viewer review tools (MCP server `ghv-…`): get_pr_context, list_review_threads, and draft_comment. Only draft comments when I ask you to; drafts go to me for review before anything is posted."
+            "\nYou have GH Viewer review tools (MCP server `ghv-…`): get_pr_context, list_review_threads, and draft_comment. Only draft comments when I ask you to; drafts go to me for review before anything is posted. When a comment proposes replacement code for exactly the lines it is on (right side only), put that code in a ```suggestion block in its body, so the author can apply it in one click."
         );
     }
     if let Some(selection) = selection {
@@ -742,6 +759,8 @@ mod tests {
                 files: vec![ChangedFile { path: "src/a.rs".into(), viewed: ViewedState::Unviewed }],
                 threads: vec![thread],
                 pending_review: None,
+                failed_checks: vec![],
+                last_reviewed_oid: None,
             },
             checkout: Checkout {
                 repo: "o/r".into(),
@@ -753,6 +772,7 @@ mod tests {
                 merge_base_oid: "a".repeat(40),
             },
             files: vec![file],
+            changed_since_review: None,
         }
     }
 

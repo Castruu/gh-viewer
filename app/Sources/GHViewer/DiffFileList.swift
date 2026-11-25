@@ -16,7 +16,8 @@ struct DiffFileList: View {
             let viewed = review.viewedPaths
             let byPath = Dictionary(files.map { ($0.path, $0) }) { first, _ in first }
             // The tree is rebuilt on each redraw, which is nothing for hundreds of files; cache it if a PR with thousands drags.
-            let rows = fileTree(of: files.map(\.path).filter { !hidesViewed || !viewed.contains($0) }).filter { row in
+            let paths = review.shown(files, path: \.path).map(\.path)
+            let rows = fileTree(of: paths.filter { !hidesViewed || !viewed.contains($0) }).filter { row in
                 !collapsed.contains { row.path.hasPrefix($0) && row.path != $0 }
             }
             List(rows, selection: Binding(get: { selection }, set: { path in

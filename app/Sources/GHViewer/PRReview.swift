@@ -30,6 +30,8 @@ final class PRReview {
     var selection: Selection?
     /// Set by the file tree in the sidebar; the diff scrolls to that file.
     var scrollRequest: DiffScrollRequest?
+    /// The summary bar's switch: only the files that changed since the last review you submitted.
+    var showsOnlyChangedSinceReview = false
     var chat = ChatState()
     /// Set by Stop until the turn ends, which disables the button. Before the
     /// session exists, the question is then dropped instead of sent.
@@ -79,6 +81,22 @@ final class PRReview {
             loadState = .failed(error.coreMessage)
         }
         reloadDrafts()
+    }
+
+    /// The files to show: all of them, or only those changed since your last review.
+    func shown<File>(_ files: [File], path: (File) -> String) -> [File] {
+        guard showsOnlyChangedSinceReview, let changed = opened?.changedSinceReview else { return files }
+        let changedPaths = Set(changed)
+        return files.filter { changedPaths.contains(path($0)) }
+    }
+
+    /// Drops the diff to free its memory, unless something still works on it. Selecting the PR loads it again.
+    func unloadIfIdle() {
+        guard loadState == .loaded, !chat.isRunning, chat.sessions.isEmpty, !isSubmitting else { return }
+        opened = nil
+        selection = nil
+        loadState = .idle
+        store.hub.close(repo: repo, number: number)
     }
 
     func reloadDrafts() {

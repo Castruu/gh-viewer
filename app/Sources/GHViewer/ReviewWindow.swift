@@ -102,7 +102,8 @@ private struct PRDetail: View {
     var body: some View {
         if let pullRequest = model.selectedPullRequest {
             VStack(spacing: 0) {
-                PRHeader(pullRequest: pullRequest, isInDashboard: model.isSelectionInDashboard)
+                PRHeader(pullRequest: pullRequest, isInDashboard: model.isSelectionInDashboard,
+                         failedChecks: reviews.review(for: pullRequest).opened?.detail.failedChecks ?? [])
                 PRDescription(markdown: reviews.review(for: pullRequest).opened?.detail.body ?? "")
                 Divider()
                 DiffPane(review: reviews.review(for: pullRequest)) { url in
@@ -115,6 +116,7 @@ private struct PRDetail: View {
             // Warms the next PR waiting on you, so moving on after a submit doesn't wait on a fetch.
             // After a pause, so clicking through the list doesn't fetch every PR on the way.
             .task(id: pullRequest.url) {
+                reviews.used(reviews.review(for: pullRequest))
                 try? await Task.sleep(for: .seconds(3))
                 let waiting = model.dashboard?.reviewRequested ?? []
                 guard !Task.isCancelled, !ProcessInfo.processInfo.isLowPowerModeEnabled,
@@ -123,6 +125,8 @@ private struct PRDetail: View {
                 else { return }
                 let review = reviews.review(for: next)
                 if review.loadState == .idle { await review.load() }
+                reviews.used(review)
+                reviews.used(reviews.review(for: pullRequest))
             }
             .overlay(alignment: .bottom) {
                 if let submittedURL {
@@ -186,6 +190,8 @@ private struct PRDescription: View {
 private struct PRHeader: View {
     let pullRequest: PullRequest
     let isInDashboard: Bool
+    let failedChecks: [FailedCheck]
+    @Environment(\.palette) private var palette
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -209,6 +215,29 @@ private struct PRHeader: View {
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)
                 PRStatusText(pullRequest: pullRequest)
+            }
+
+            if !failedChecks.isEmpty {
+                // Which checks, each a link to its run, instead of only "checks failing".
+                HStack(spacing: 8) {
+                    Text("Failing:")
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(failedChecks.prefix(4).enumerated()), id: \.offset) { _, check in
+                        if let url = check.url.flatMap(URL.init(string:)) {
+                            Link(check.name, destination: url)
+                                .help("Open this check")
+                        } else {
+                            Text(check.name)
+                        }
+                    }
+                    .foregroundStyle(palette.fail)
+                    if failedChecks.count > 4 {
+                        Text("and \(failedChecks.count - 4) more")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.callout)
+                .lineLimit(1)
             }
 
             if !isInDashboard {
