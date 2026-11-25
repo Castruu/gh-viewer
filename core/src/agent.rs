@@ -242,6 +242,8 @@ struct Session {
     /// Set by Stop until the turn ends. Latched, so a Stop that comes before
     /// `prompt` waits on it still counts.
     stop: Arc<tokio::sync::watch::Sender<Stopped>>,
+    /// The turn id of the prompt in flight.
+    active: Option<String>,
     /// Names of the app's MCP servers passed in `session/new`.
     mcp_servers: Vec<String>,
     /// Whether the adapter supports `session/close`.
@@ -369,6 +371,7 @@ impl AgentHub {
             process: process.id,
             cx: process.cx,
             stop: Arc::new(tokio::sync::watch::channel(Stopped::No).0),
+            active: None,
             mcp_servers: names,
             closes: process.closes,
         };
@@ -390,6 +393,11 @@ impl AgentHub {
     pub fn cancel(&self, session_id: String, turn_id: String) {
         let mut shared = self.shared();
         if let Some(session) = shared.sessions.get(&session_id) {
+            // A Stop for a turn that's over must not touch the one running now.
+            // With none running, it's kept for a prompt of that same turn id.
+            if session.active.as_ref().is_some_and(|active| *active != turn_id) {
+                return;
+            }
             let stop = Stopped::Turn(turn_id);
             if session.stop.send_replace(stop.clone()) != stop {
                 // Only fails if the connection is already gone, which ends the turn anyway.
@@ -444,17 +452,18 @@ impl AgentHub {
         turn_id: String,
         text: String,
     ) -> Result<(String, bool), CoreError> {
-        let (kind, cx, stop) = self
-            .shared()
-            .sessions
-            .get(&session_id)
-            .map(|session| (session.kind, session.cx.clone(), session.stop.clone()))
-            .ok_or_else(|| {
+        let (kind, cx, stop) = {
+            let mut shared = self.shared();
+            let session = shared.sessions.get_mut(&session_id).ok_or_else(|| {
                 CoreError::Agent("This agent session has ended. Start a new one.".into())
             })?;
+            session.active = Some(turn_id.clone());
+            (session.kind, session.cx.clone(), session.stop.clone())
+        };
         let mut stopped = stop.subscribe();
         // A Stop for this turn came before it was sent; one for an earlier turn is stale.
         if stop.send_replace(Stopped::No) == Stopped::Turn(turn_id.clone()) {
+            self.end_turn(&session_id, &turn_id);
             return Ok(("cancelled".into(), false));
         }
         let request = acp::PromptRequest::new(session_id.clone(), vec![text.into()]);
@@ -483,12 +492,22 @@ impl AgentHub {
             }
             ours
         });
+        self.end_turn(&session_id, &turn_id);
         let response = response
             .map_err(|error| {
                 signed_out(kind, &error)
                     .unwrap_or_else(|| CoreError::Agent(format!("{}: {error}", kind.name())))
             })?;
         Ok((wire_name(&response.stop_reason), true))
+    }
+
+    /// Forgets `turn_id` as the session's turn in flight, if it still is.
+    fn end_turn(&self, session_id: &str, turn_id: &str) {
+        if let Some(session) = self.shared().sessions.get_mut(session_id)
+            && session.active.as_deref() == Some(turn_id)
+        {
+            session.active = None;
+        }
     }
 
     fn with_launcher(listener: Arc<dyn AgentListener>, launch: Launcher) -> Self {
@@ -1401,6 +1420,25 @@ mod tests {
             // Stop pressed for turn 1 just as it ended.
             hub.cancel(session.clone(), "1".into());
         }
+    }
+
+    #[tokio::test]
+    async fn a_stop_for_another_turn_doesnt_touch_the_running_one() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Codex, "/tmp".into(), vec![server("http://other-turn")])
+            .await
+            .unwrap();
+        let (turn_hub, turn_session) = (hub.clone(), session.clone());
+        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "B".into(), "ping".into()).await });
+        assert_eq!(events.recv().await, Some((session.clone(), message("pong"))));
+        let (request_id, _, _) = permission_request(&mut events).await;
+
+        // Stop for turn A, which already ended, while B waits for permission.
+        hub.cancel(session.clone(), "A".into());
+        hub.respond_permission(request_id, Some("yes".into()));
+        assert_eq!(events.recv().await, Some((session, message("yes"))));
+        assert_eq!(turn.await.unwrap().unwrap(), "end_turn");
     }
 
     #[tokio::test]
