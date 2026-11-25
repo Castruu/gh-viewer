@@ -97,8 +97,10 @@ final class PRReview {
     // MARK: Drafts
 
     /// Adds your own comment on `selection`. The views only offer commentable lines.
-    func addDraft(on selection: Selection, body: String) {
-        guard let commit = opened?.checkout.headOid else { return }
+    /// False if it failed, with the reason in `actionError`; the same goes for the other draft actions.
+    @discardableResult
+    func addDraft(on selection: Selection, body: String) -> Bool {
+        guard let commit = opened?.checkout.headOid else { return false }
         let single = selection.startLine == selection.line && selection.startSide == selection.side
         let draft = NewDraft(
             path: selection.path,
@@ -110,14 +112,16 @@ final class PRReview {
             author: .you,
             commitOid: commit
         )
-        perform { _ = try self.store.drafts.add(repo: self.repo, number: self.number, draft: draft) }
+        return perform { _ = try self.store.drafts.add(repo: self.repo, number: self.number, draft: draft) }
     }
 
-    func updateDraft(id: String, body: String) {
+    @discardableResult
+    func updateDraft(id: String, body: String) -> Bool {
         perform { try self.store.drafts.updateBody(repo: self.repo, number: self.number, id: id, body: body) }
     }
 
-    func removeDraft(id: String) {
+    @discardableResult
+    func removeDraft(id: String) -> Bool {
         perform { try self.store.drafts.remove(repo: self.repo, number: self.number, id: id) }
     }
 
@@ -144,14 +148,17 @@ final class PRReview {
         }
     }
 
-    private func perform(_ action: () throws -> Void) {
+    @discardableResult
+    private func perform(_ action: () throws -> Void) -> Bool {
+        // The store's listener also reloads, but only after a main-actor hop; reload now so the UI doesn't lag.
+        defer { reloadDrafts() }
         do {
             try action()
+            return true
         } catch {
             actionError = error.coreMessage
+            return false
         }
-        // The store's listener also reloads, but only after a main-actor hop; reload now so the UI doesn't lag.
-        reloadDrafts()
     }
 
     // MARK: Agent chat

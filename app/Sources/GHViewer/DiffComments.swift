@@ -18,9 +18,8 @@ struct DiffLineComments: View {
             ForEach(drafts, id: \.id) { draft in
                 if editor == .draft(id: draft.id) {
                     DiffCommentEditor(initialText: draft.body, submitLabel: "Save") { body in
-                        review.updateDraft(id: draft.id, body: body)
                         // Keep the editor open if the save failed; the error banner says why.
-                        if review.drafts.first(where: { $0.id == draft.id })?.body == body { editor = nil }
+                        if review.updateDraft(id: draft.id, body: body) { editor = nil }
                     } cancel: {
                         editor = nil
                     }
@@ -32,9 +31,7 @@ struct DiffLineComments: View {
             }
             if let composing {
                 DiffCommentEditor(initialText: "", submitLabel: "Comment") { body in
-                    let count = review.drafts.count
-                    review.addDraft(on: composing, body: body)
-                    if review.drafts.count > count {
+                    if review.addDraft(on: composing, body: body) {
                         editor = nil
                         review.selection = nil
                     }
