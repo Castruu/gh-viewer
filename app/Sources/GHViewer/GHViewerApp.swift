@@ -36,6 +36,13 @@ struct GHViewerApp: App {
         }
         // Room for the sidebar, the diff and the agent chat side by side.
         .defaultSize(width: 1280, height: 800)
+        // The window says what it is; the name only takes room from the toolbar.
+        .windowToolbarStyle(.unified(showsTitle: false))
+
+        Settings {
+            ThemeSettings()
+                .themed()
+        }
     }
 }
 
@@ -48,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let saved = UserDefaults.standard.string(forKey: ThemeKey.appearance) ?? ""
         NSApp.appearance = Appearance(rawValue: saved)?.nsAppearance
+        AppIcon(rawValue: UserDefaults.standard.string(forKey: AppIcon.key) ?? "")?.apply()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {

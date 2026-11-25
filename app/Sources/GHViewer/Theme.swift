@@ -3,8 +3,7 @@ import SwiftUI
 
 /// Every accent color the app uses, by role. Ported from Argus's palettes: the
 /// dark variants are Argus's own colors, and the light variants are deeper
-/// versions that stay readable on white. Pick one from the palette button in the
-/// review window's toolbar (click for the next, hold to choose); it's remembered.
+/// versions that stay readable on white. Pick one in Settings (⌘,); it's remembered.
 struct Palette: Identifiable {
     let id: String
     let name: String
@@ -113,6 +112,24 @@ enum Appearance: String, CaseIterable, Identifiable {
     }
 }
 
+/// The icon in the Dock and the app switcher, picked in Settings. Finder keeps showing the
+/// bundle's own (Moss): changing that means rewriting the app, which would break its signature.
+enum AppIcon: String, CaseIterable, Identifiable {
+    case moss, ember, paper, ink
+
+    static let key = "appIcon"
+
+    var id: Self { self }
+    var name: String { rawValue.capitalized }
+    /// From the bundle's Resources, where scripts/build.sh copies app/Icons.
+    var image: NSImage? { Bundle.main.image(forResource: "icon-\(rawValue)") }
+
+    @MainActor
+    func apply() {
+        NSApp.applicationIconImage = image
+    }
+}
+
 /// `UserDefaults` keys, shared by every view that reads or sets the theme.
 enum ThemeKey {
     static let palette = "palette"
@@ -152,29 +169,48 @@ private struct Themed: ViewModifier {
     }
 }
 
-/// Toolbar button: click for the next palette, hold (or use the arrow) to pick a palette or appearance.
-struct ThemeMenu: View {
+/// Settings (⌘,): the palette, and light or dark.
+struct ThemeSettings: View {
     @AppStorage(ThemeKey.palette) private var paletteID = Palette.cool.id
     @AppStorage(ThemeKey.appearance) private var appearance = Appearance.system
+    @AppStorage(AppIcon.key) private var appIcon = AppIcon.moss
 
     var body: some View {
-        let current = Palette.named(paletteID)
-        Menu {
-            Picker("Palette", selection: $paletteID) {
+        Form {
+            Picker("Colors", selection: $paletteID) {
                 ForEach(Palette.all) { Text($0.name).tag($0.id) }
             }
-            .pickerStyle(.inline)
             Picker("Appearance", selection: $appearance) {
                 ForEach(Appearance.allCases) { Text($0.name).tag($0) }
             }
-            .pickerStyle(.inline)
-        } label: {
-            Label("Theme", systemImage: "paintpalette")
-        } primaryAction: {
-            let index = Palette.all.firstIndex { $0.id == current.id } ?? 0
-            paletteID = Palette.all[(index + 1) % Palette.all.count].id
+            .pickerStyle(.segmented)
+            LabeledContent("App Icon") {
+                HStack(spacing: 8) {
+                    ForEach(AppIcon.allCases) { icon in
+                        Button {
+                            appIcon = icon
+                        } label: {
+                            Image(nsImage: icon.image ?? NSImage())
+                                .resizable()
+                                .frame(width: 44, height: 44)
+                                .padding(3)
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 13)
+                                        .strokeBorder(.tint, lineWidth: appIcon == icon ? 2 : 0)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .help(icon.name)
+                        .accessibilityLabel(icon.name)
+                        .accessibilityAddTraits(appIcon == icon ? .isSelected : [])
+                    }
+                }
+            }
         }
-        .help("Colors: \(current.name), \(appearance.name). Click for the next palette, hold to choose")
+        .onChange(of: appIcon) { appIcon.apply() }
+        .formStyle(.grouped)
+        .frame(width: 380)
+        .fixedSize()
     }
 }
 

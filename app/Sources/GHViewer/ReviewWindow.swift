@@ -11,13 +11,15 @@ struct ReviewWindow: View {
 
     let model: AppModel
     let reviews: ReviewStore
+    /// Open from the start: the agent is the point of the app. Closing it is remembered.
+    @AppStorage("showsChat") private var showsChat = true
     @State private var isChatPresented = false
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         NavigationSplitView {
-            ReviewSidebar(model: model)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
+            ReviewSidebar(model: model, reviews: reviews)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 420)
         } detail: {
             PRDetail(model: model, reviews: reviews)
                 // On the detail column, not the split view: there it becomes a third column.
@@ -28,9 +30,6 @@ struct ReviewWindow: View {
                 }
         }
         .toolbar {
-            ToolbarItem {
-                ThemeMenu()
-            }
             ToolbarItem {
                 RefreshButton(model: model)
             }
@@ -48,6 +47,12 @@ struct ReviewWindow: View {
                 isChatPresented = true
             }
         }
+        // An inspector that's already open in the window's first layout pushes the columns
+        // past the window's edges, so it opens right after.
+        .task { isChatPresented = showsChat }
+        .onChange(of: isChatPresented) { showsChat = isChatPresented }
+        // On opening, and again once the first dashboard arrives.
+        .onChange(of: model.dashboard == nil, initial: true) { model.selectDefaultPullRequest() }
         .frame(minWidth: 760, minHeight: 440)
         .themed()
         .environment(\.openURL, OpenURLAction { $0.isWebLink ? .systemAction : .discarded })
@@ -90,15 +95,30 @@ extension OpenWindowAction {
 private struct PRDetail: View {
     let model: AppModel
     let reviews: ReviewStore
+    /// The last submitted review's URL, shown briefly as a confirmation. Kept here, above the
+    /// per-PR diff, so it's still on screen after moving on to the next PR.
+    @State private var submittedURL: String?
 
     var body: some View {
         if let pullRequest = model.selectedPullRequest {
             VStack(spacing: 0) {
                 PRHeader(pullRequest: pullRequest, isInDashboard: model.isSelectionInDashboard)
                 Divider()
-                DiffPane(review: reviews.review(for: pullRequest))
-                    // One diff view per PR, so scroll position and selection don't leak between PRs.
-                    .id(pullRequest.url)
+                DiffPane(review: reviews.review(for: pullRequest)) { url in
+                    submittedURL = url
+                    model.selectNextPullRequestToReview()
+                }
+                // One diff view per PR, so scroll position and selection don't leak between PRs.
+                .id(pullRequest.url)
+            }
+            .overlay(alignment: .bottom) {
+                if let submittedURL {
+                    SubmitConfirmation(url: submittedURL) { self.submittedURL = nil }
+                        .task(id: submittedURL) {
+                            try? await Task.sleep(for: .seconds(8))
+                            self.submittedURL = nil
+                        }
+                }
             }
         } else {
             ContentUnavailableView("No Pull Request Selected", systemImage: "arrow.triangle.pull",
@@ -115,27 +135,25 @@ private struct PRHeader: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(pullRequest.title)
-                    .font(.title2.weight(.semibold))
+                    .font(.title3.weight(.semibold))
                     .textSelection(.enabled)
                 Spacer(minLength: 0)
-                Button("Open in Browser") {
+                Button("Open in Browser", systemImage: "arrow.up.right") {
                     if let url = URL(string: pullRequest.url) {
                         NSWorkspace.shared.open(url)
                     }
                 }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
                 .help("Open this pull request on GitHub")
             }
 
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                ReviewIcon(decision: pullRequest.reviewDecision)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(byline)
                     .textSelection(.enabled)
-                if pullRequest.isDraft {
-                    DraftBadge()
-                }
-                CheckIcon(state: pullRequest.checkState)
+                    .foregroundStyle(.secondary)
+                PRStatusText(pullRequest: pullRequest)
             }
-            .foregroundStyle(.secondary)
 
             if !isInDashboard {
                 Label("No longer in your lists, so this may be out of date. It may have been merged or closed.",
@@ -144,7 +162,8 @@ private struct PRHeader: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

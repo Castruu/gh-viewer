@@ -28,6 +28,8 @@ final class PRReview {
     var actionError: String?
     /// The diff lines the user selected. Questions to the agent include them.
     var selection: Selection?
+    /// Set by the file tree in the sidebar; the diff scrolls to that file.
+    var scrollRequest: DiffScrollRequest?
     var chat = ChatState()
     /// Set by Stop until the turn ends, which disables the button. Before the
     /// session exists, the question is then dropped instead of sent.

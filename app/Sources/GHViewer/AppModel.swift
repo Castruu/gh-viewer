@@ -62,6 +62,28 @@ final class AppModel {
         }
     }
 
+    /// An empty window costs a click, so it opens where you left off, or on the first PR waiting on you.
+    func selectDefaultPullRequest() {
+        guard selectedPullRequest == nil, let dashboard else { return }
+        selectedPullRequestURL = (dashboard.reviewRequested.first ?? dashboard.allPullRequests.first)?.url
+    }
+
+    /// After you submit a review: on to the next PR waiting on you, if the one you reviewed was one of them.
+    func selectNextPullRequestToReview() {
+        if let next = Self.next(after: selectedPullRequestURL, in: dashboard?.reviewRequested.map(\.url) ?? []) {
+            selectedPullRequestURL = next
+        }
+        // GitHub drops your review request once you've reviewed.
+        Task { await refresh() }
+    }
+
+    /// The PR after `url` among the ones waiting on you, wrapping around. `nil` when `url`
+    /// isn't one of them (a review of your own PR, say) or is the only one.
+    nonisolated static func next(after url: String?, in waiting: [String]) -> String? {
+        guard waiting.count > 1, let index = waiting.firstIndex(where: { $0 == url }) else { return nil }
+        return waiting[(index + 1) % waiting.count]
+    }
+
     /// The selected PR as last seen, even if a refresh has since dropped it from the dashboard.
     var selectedPullRequest: PullRequest? {
         selectedPullRequestURL.flatMap { lastKnownPullRequests[$0] }

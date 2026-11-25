@@ -1,42 +1,70 @@
 import SwiftUI
 
-/// The changed files beside the diff. Clicking one scrolls the diff to it.
+/// The open PR's changed files as a folder tree, in the sidebar. Clicking a file scrolls the diff to it.
 struct DiffFileList: View {
     let review: PRReview
-    let files: [DiffFileModel]
-    let select: (String) -> Void
-    let setViewed: (String, Bool) -> Void
     @State private var selection: String?
+    /// Folder paths, each ending in "/".
+    @State private var collapsed: Set<String> = []
+    private static let indent: CGFloat = 12
 
     var body: some View {
-        let draftCounts = Dictionary(grouping: review.drafts, by: \.path).mapValues(\.count)
-        let viewed = review.viewedPaths
-        List(files, selection: Binding(get: { selection }, set: { path in
-            selection = path
-            if let path { select(path) }
-        })) { file in
-            DiffFileRow(file: file, draftCount: draftCounts[file.id] ?? 0, isViewed: viewed.contains(file.id),
-                        canMarkViewed: review.canMarkViewed) {
-                setViewed(file.id, $0)
+        if let files = review.opened?.files {
+            let draftCounts = Dictionary(grouping: review.drafts, by: \.path).mapValues(\.count)
+            let viewed = review.viewedPaths
+            let byPath = Dictionary(files.map { ($0.path, $0) }) { first, _ in first }
+            // The tree is rebuilt on each redraw, which is nothing for hundreds of files; cache it if a PR with thousands drags.
+            let rows = fileTree(of: files.map(\.path)).filter { row in
+                !collapsed.contains { row.path.hasPrefix($0) && row.path != $0 }
             }
+            List(rows, selection: Binding(get: { selection }, set: { path in
+                selection = path
+                if let path { review.scrollRequest = DiffScrollRequest(path: path) }
+            })) { row in
+                switch row {
+                case .folder(let path, let name, let depth):
+                    Button {
+                        collapsed.formSymmetricDifference([path])
+                    } label: {
+                        Label(name, systemImage: collapsed.contains(path) ? "folder.fill" : "folder")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, CGFloat(depth) * Self.indent)
+                    .selectionDisabled()
+                    .help(collapsed.contains(path) ? "Show the files in \(path)" : "Hide the files in \(path)")
+                case .file(let path, let depth):
+                    if let file = byPath[path] {
+                        DiffFileRow(file: file, draftCount: draftCounts[path] ?? 0, isViewed: viewed.contains(path))
+                            .padding(.leading, CGFloat(depth) * Self.indent)
+                    }
+                }
+            }
+        } else {
+            ContentUnavailableView("No Files Yet", systemImage: "doc.on.doc",
+                                   description: Text("They show once the pull request has loaded."))
         }
-        .listStyle(.plain)
     }
 }
 
 private struct DiffFileRow: View {
-    let file: DiffFileModel
+    let file: DiffFile
     let draftCount: Int
     let isViewed: Bool
-    let canMarkViewed: Bool
-    let setViewed: (Bool) -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            DiffStatusMark(status: file.file.status)
+            DiffStatusMark(status: file.status)
             VStack(alignment: .leading, spacing: 1) {
-                DiffPathText(file: file.file, renameArrow: false)
-                if let oldPath = file.file.oldPath {
+                // The folder rows above say where it is.
+                Text(verbatim: file.path.splitPath.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let oldPath = file.oldPath {
                     Text(verbatim: "\(oldPath) →")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -52,17 +80,15 @@ private struct DiffFileRow: View {
                     .foregroundStyle(.secondary)
                     .help(countLabel(draftCount, "draft"))
             }
-            DiffLineCounts(additions: file.additions, deletions: file.deletions)
-                .font(.caption)
-            Toggle("Viewed", isOn: Binding(get: { isViewed }, set: setViewed))
-                .toggleStyle(.checkbox)
-                .labelsHidden()
-                .disabled(!canMarkViewed)
-                .help(!canMarkViewed ? PRReview.viewedUnavailableHelp
-                      : isViewed ? "Viewed on GitHub. Uncheck to mark as not viewed" : "Mark as viewed on GitHub")
+            if isViewed {
+                Image(systemName: "checkmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Viewed on GitHub")
+            }
         }
         .opacity(isViewed ? 0.6 : 1)
-        .help(file.file.oldPath.map { "\($0) → \(file.id)" } ?? file.id)
+        .help(file.oldPath.map { "\($0) → \(file.path)" } ?? file.path)
     }
 }
 

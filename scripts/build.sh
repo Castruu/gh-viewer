@@ -42,6 +42,8 @@ cp "$BIN_DIR/$APP_NAME" "$APP/Contents/MacOS/"
 cp app/Info.plist "$APP/Contents/"
 # Rendered from docs/assets/icon.svg.
 cp app/AppIcon.icns "$APP/Contents/Resources/"
+# The icons to pick from in Settings, rendered from docs/assets/icons.
+cp app/Icons/*.png "$APP/Contents/Resources/"
 # Ad-hoc signature: enough to run locally, not for distribution.
 codesign --force --sign - "$APP"
 
