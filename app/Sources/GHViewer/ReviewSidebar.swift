@@ -5,33 +5,64 @@ struct ReviewSidebar: View {
     @Bindable var model: AppModel
     let reviews: ReviewStore
     /// The PRs you've already reviewed are the least urgent, so they start folded.
-    @State private var collapsed: Set<String> = ["Reviewed by you"]
+    @State private var collapsed: Set<String> = [SidebarSection.reviewed]
     @State private var showsFiles = false
+    // The filter's checkboxes. What needs your review always shows: that's what the app is for.
+    @AppStorage("sidebarShowsYours") private var showsYours = true
+    @AppStorage("sidebarShowsReviewed") private var showsReviewed = true
+    @AppStorage("sidebarHidesViewedFiles") private var hidesViewedFiles = false
 
     var body: some View {
         VStack(spacing: 0) {
             // One list at a time: your pull requests, or the files of the one that's open.
-            Picker("Show", selection: $showsFiles) {
-                Text("Pull Requests").tag(false)
-                Text("Files").tag(true)
+            HStack(spacing: 6) {
+                Picker("Show", selection: $showsFiles) {
+                    Text("Pull Requests").tag(false)
+                    Text("Files").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(model.selectedPullRequest == nil)
+                filterMenu
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
-            .disabled(model.selectedPullRequest == nil)
             if showsFiles, let pullRequest = model.selectedPullRequest {
-                DiffFileList(review: reviews.review(for: pullRequest))
+                DiffFileList(review: reviews.review(for: pullRequest), hidesViewed: hidesViewedFiles)
             } else {
                 pullRequests
             }
         }
     }
 
+    /// Less to read: untick what you don't need to see. The icon fills in while something is hidden.
+    private var filterMenu: some View {
+        Menu {
+            Section("Pull Requests") {
+                Toggle(SidebarSection.yours, isOn: $showsYours)
+                Toggle(SidebarSection.reviewed, isOn: $showsReviewed)
+            }
+            Section("Files") {
+                Toggle("Hide Viewed Files", isOn: $hidesViewedFiles)
+            }
+        } label: {
+            let isFiltering = !showsYours || !showsReviewed || hidesViewedFiles
+            Label("Filter", systemImage: isFiltering ? "line.3.horizontal.decrease.circle.fill"
+                                                    : "line.3.horizontal.decrease.circle")
+                .labelStyle(.iconOnly)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Choose what the sidebar shows")
+    }
+
     @ViewBuilder
     private var pullRequests: some View {
         if let dashboard = model.dashboard {
-            let sections = dashboard.sidebarSections
+            let sections = dashboard.sidebarSections.filter {
+                (showsYours || $0.title != SidebarSection.yours) && (showsReviewed || $0.title != SidebarSection.reviewed)
+            }
             // A VStack rather than safe area insets, so rows never scroll under the banner or status.
             VStack(spacing: 0) {
                 if !dashboard.warnings.isEmpty {
@@ -93,6 +124,9 @@ struct ReviewSidebar: View {
 
 /// One sidebar section: the PRs that need the same thing from you.
 struct SidebarSection: Identifiable {
+    static let yours = "Your pull requests"
+    static let reviewed = "Reviewed by you"
+
     let title: String
     let pullRequests: [PullRequest]
 
@@ -104,7 +138,7 @@ extension Dashboard {
     /// A PR can be in several of GitHub's lists; it shows once, in the first.
     var sidebarSections: [SidebarSection] {
         var seen = Set<String>()
-        return [("Needs your review", reviewRequested), ("Your pull requests", authored), ("Reviewed by you", reviewedByMe)]
+        return [("Needs your review", reviewRequested), (SidebarSection.yours, authored), (SidebarSection.reviewed, reviewedByMe)]
             .map { title, list in SidebarSection(title: title, pullRequests: list.filter { seen.insert($0.url).inserted }) }
             .filter { !$0.pullRequests.isEmpty }
     }

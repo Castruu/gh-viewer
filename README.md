@@ -84,7 +84,7 @@ for the Dock.
 
 - Your PRs grouped by what they need: your review, your own, and the ones you've already reviewed.
 - The window opens on the first PR waiting on you, and moves to the next one after you submit a review.
-- The sidebar switches between your pull requests and the open one's files, as a folder tree. Hover a diff line for the "+", click it to comment or ask the agent.
+- The sidebar switches between your pull requests and the open one's files, as a folder tree. Its filter button hides the sections or the viewed files you don't need to see. Hover a diff line for the "+", click it to comment or ask the agent.
 - A unified diff computed from a local checkout, not fetched from GitHub's API.
 - "Viewed" checkboxes sync with GitHub. Viewed and very large files start collapsed.
 - Review threads from GitHub, placed on the lines they're about.
