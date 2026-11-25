@@ -129,9 +129,10 @@ private enum ArchivedItem: Codable {
         case .plan(let entries):
             .plan(entries.map { PlanEntry(content: $0.content, status: $0.status) })
         case .permission(let requestId, let title, let toolTitle, let options, let answer):
+            // History only: the request is gone, and its id must never answer a new one.
             .permission(requestId: requestId, title: title, toolTitle: toolTitle,
                         options: options.map { PermissionChoice(id: $0.id, name: $0.name, kind: $0.kind) },
-                        answer: answer)
+                        answer: answer ?? "Not answered")
         case .notice(let text):
             .notice(text)
         case .info(let text):

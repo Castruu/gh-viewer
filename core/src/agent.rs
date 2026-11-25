@@ -517,7 +517,9 @@ impl AgentHub {
                     let (reply, answer) = oneshot::channel();
                     let request_id = {
                         let mut shared = lock(&shared);
-                        let request_id = format!("permission-{}", shared.next_id());
+                        // A per-run prefix, so a card from a saved chat can never match a new request.
+                        static RUN: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::mcp::random_hex);
+                        let request_id = format!("permission-{}-{}", *RUN, shared.next_id());
                         let pending = PendingPermission {
                             session_id: session_id.clone(),
                             reply,

@@ -267,7 +267,7 @@ fn plain_response(
 }
 
 /// 128 bits from the OS's CSPRNG, as hex.
-fn random_hex() -> String {
+pub(crate) fn random_hex() -> String {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("the OS random number generator should be available");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
