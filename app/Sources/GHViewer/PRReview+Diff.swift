@@ -26,24 +26,26 @@ extension PRReview {
     }
 
     /// How many of `comments` aren't one of `drafts`, paired one to one as the core does: path,
-    /// original range, text, and side where a comment's is known.
+    /// original range (the current one if GitHub left it out), text, and side where a comment's is known.
     nonisolated static func startedOnGitHub(_ comments: [PendingComment], drafts: [DraftComment]) -> Int {
         let trimmed = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines) }
         // A single-line range is sent without a start line, whichever way it was stored.
         let start = { (start: UInt32?, line: UInt32?) in start == line ? nil : start }
-        let same = { (draft: DraftComment, comment: PendingComment) in
-            comment.path == draft.path && comment.originalLine == draft.line
-                && start(comment.originalStartLine, comment.originalLine) == start(draft.startLine, draft.line)
+        let same = { (draft: DraftComment, comment: PendingComment) -> Bool in
+            let line = comment.originalLine ?? comment.line
+            return comment.path == draft.path && line == draft.line
+                && start(comment.originalStartLine ?? comment.startLine, line) == start(draft.startLine, draft.line)
                 && trimmed(comment.body) == trimmed(draft.body)
-                && (comment.side == .right || draft.side == .left)
+                && (comment.side == nil || comment.side == draft.side)
         }
         var used = Array(repeating: false, count: comments.count)
         var found = Array(repeating: false, count: drafts.count)
-        // Known-left comments first, so a draft that could take either leaves them be.
-        for left in [true, false] {
+        // Comments whose side is known first, so a draft that matches one leaves a context line's
+        // comment for a draft on the other side.
+        for known in [true, false] {
             for (index, draft) in drafts.enumerated() where !found[index] {
                 if let match = comments.indices.first(where: {
-                    !used[$0] && (comments[$0].side == .left) == left && same(draft, comments[$0])
+                    !used[$0] && (comments[$0].side != nil) == known && same(draft, comments[$0])
                 }) {
                     used[match] = true
                     found[index] = true

@@ -130,8 +130,10 @@ struct DiffAnnotations {
             self.drafts[DiffAnchor(path: draft.path, side: draft.side, line: draft.line), default: []].append(draft)
         }
         for comment in pending {
+            // A context line's comment may be on either side; GitHub numbers it like the right one's.
             if let line = comment.line, pendingInline {
-                self.pending[DiffAnchor(path: comment.path, side: comment.side, line: line), default: []].append(comment)
+                self.pending[DiffAnchor(path: comment.path, side: comment.side ?? .right, line: line), default: []]
+                    .append(comment)
             } else {
                 notes[comment.path, default: DiffFileNotes()].pending.append(comment)
             }

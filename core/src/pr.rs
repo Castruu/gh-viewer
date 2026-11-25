@@ -160,8 +160,9 @@ pub struct PendingComment {
     pub original_line: Option<u32>,
     pub original_start_line: Option<u32>,
     /// Inferred from the diff hunk, as GitHub doesn't report it for review
-    /// comments: `Left` only when the commented line was removed.
-    pub side: DiffSide,
+    /// comments: `Left` on a removed line, `Right` on an added one, and `None`
+    /// on a context line, which a comment may be on either side of.
+    pub side: Option<DiffSide>,
     pub body: String,
 }
 
@@ -1043,27 +1044,29 @@ fn check_threads_land(head: &str, commit_oid: &str, review_url: &str) -> Result<
 
 /// Pairs each draft with a review comment that is it, one to one: two identical
 /// drafts need two comments. They match on path, original range (which later
-/// pushes don't move) and trimmed text, and on side where the comment's is
-/// known. Returns whether each draft found its comment.
+/// pushes don't move, so the current one is only a fallback) and trimmed text,
+/// and on side where the comment's is known. Returns whether each draft found
+/// its comment.
 fn find_in(drafts: &[DraftComment], comments: &[PendingComment]) -> Vec<bool> {
     // A single-line range is sent without a start line, whichever way it was stored.
     let start = |start: Option<u32>, line: Option<u32>| start.filter(|&s| Some(s) != line);
     let same = |draft: &DraftComment, comment: &PendingComment| {
+        let line = comment.original_line.or(comment.line);
         comment.path == draft.path
-            && comment.original_line == Some(draft.line)
-            && start(comment.original_start_line, comment.original_line)
+            && line == Some(draft.line)
+            && start(comment.original_start_line.or(comment.start_line), line)
                 == start(draft.start_line, Some(draft.line))
             && comment.body.trim() == draft.body.trim()
-            // Only a removed line's side is known; a right one may be a left context line.
-            && (comment.side == DiffSide::Right || draft.side == DiffSide::Left)
+            && comment.side.is_none_or(|side| side == draft.side)
     };
     let mut used = vec![false; comments.len()];
     let mut found = vec![false; drafts.len()];
-    // Known-left comments first, so a draft that could take either leaves them be.
-    for left in [true, false] {
+    // Comments whose side is known first, so a draft that matches one leaves a
+    // context line's comment for a draft on the other side.
+    for known in [true, false] {
         for (draft, found) in drafts.iter().zip(&mut found) {
             let free = |(i, comment): &(usize, &PendingComment)| {
-                !used[*i] && (comment.side == DiffSide::Left) == left && same(draft, comment)
+                !used[*i] && comment.side.is_some() == known && same(draft, comment)
             };
             if let (false, Some((i, _))) = (*found, comments.iter().enumerate().find(free)) {
                 used[i] = true;
@@ -1293,23 +1296,25 @@ fn pending_review(review: ReviewNode) -> PendingReview {
 }
 
 fn pending_comment(comment: PendingCommentNode) -> PendingComment {
-    // The hunk ends at the commented line, and only a removed line is on the left.
-    let removed = comment
+    // The hunk ends at the commented line: a removed line is on the left, an
+    // added one on the right, and a context line on either.
+    let side = match comment
         .diff_hunk
         .lines()
         .last()
-        .is_some_and(|line| line.starts_with('-'));
+        .and_then(|line| line.chars().next())
+    {
+        Some('-') => Some(DiffSide::Left),
+        Some('+') => Some(DiffSide::Right),
+        _ => None,
+    };
     PendingComment {
         path: comment.path,
         line: comment.line,
         start_line: comment.start_line,
         original_line: comment.original_line,
         original_start_line: comment.original_start_line,
-        side: if removed {
-            DiffSide::Left
-        } else {
-            DiffSide::Right
-        },
+        side,
         body: comment.body,
     }
 }
@@ -1916,7 +1921,7 @@ mod tests {
         path: &str,
         line: Option<u32>,
         start_line: Option<u32>,
-        side: DiffSide,
+        side: Option<DiffSide>,
         body: &str,
     ) -> PendingComment {
         PendingComment {
@@ -1949,17 +1954,17 @@ mod tests {
                     "src/pr.rs",
                     Some(12),
                     Some(8),
-                    DiffSide::Right,
+                    Some(DiffSide::Right),
                     "Split this up?"
                 ),
                 pending(
                     "src/lib.rs",
                     Some(4),
                     None,
-                    DiffSide::Left,
+                    Some(DiffSide::Left),
                     "Why remove this?"
                 ),
-                pending("README.md", None, None, DiffSide::Right, "Whole file."),
+                pending("README.md", None, None, None, "Whole file."),
             ]
         );
     }
@@ -2171,7 +2176,7 @@ mod tests {
                 "src/pr.rs",
                 Some(12),
                 None,
-                DiffSide::Right,
+                Some(DiffSide::Right),
                 "comment 1",
             )],
         };
@@ -2383,7 +2388,7 @@ mod tests {
                 "x",
                 Some(1),
                 None,
-                DiffSide::Right,
+                Some(DiffSide::Right),
                 "mine"
             ))),
             Recovery::Posted
@@ -2501,30 +2506,12 @@ mod tests {
             other_line,
         ];
         let pending = [
-            // A retry after "1" and "2" went in. Bodies compare trimmed; sides aren't compared.
-            pending("src/pr.rs", Some(12), None, DiffSide::Right, "comment 1\n"),
-            pending("src/pr.rs", Some(12), Some(8), DiffSide::Right, "comment 2"),
-            pending(
-                "src/pr.rs",
-                Some(12),
-                None,
-                DiffSide::Right,
-                "comment single",
-            ),
-            pending(
-                "src/pr.rs",
-                Some(12),
-                None,
-                DiffSide::Right,
-                "comment moved",
-            ),
-            pending(
-                "src/pr.rs",
-                Some(12),
-                None,
-                DiffSide::Right,
-                "something else",
-            ),
+            // A retry after "1" and "2" went in. Bodies compare trimmed; context lines' sides aren't known.
+            pending("src/pr.rs", Some(12), None, None, "comment 1\n"),
+            pending("src/pr.rs", Some(12), Some(8), None, "comment 2"),
+            pending("src/pr.rs", Some(12), None, None, "comment single"),
+            pending("src/pr.rs", Some(12), None, None, "comment moved"),
+            pending("src/pr.rs", Some(12), None, None, "something else"),
         ];
         let ids: Vec<_> = missing(&drafts, &pending)
             .iter()
@@ -2540,7 +2527,7 @@ mod tests {
             body: "Same".into(),
             ..draft(id, None)
         };
-        let comment = pending("src/pr.rs", Some(12), None, DiffSide::Right, "Same");
+        let comment = pending("src/pr.rs", Some(12), None, None, "Same");
         // Two identical drafts need two comments.
         let drafts = [twin("a"), twin("b")];
         let one = std::slice::from_ref(&comment);
@@ -2557,7 +2544,7 @@ mod tests {
 
         // A comment known to be on a removed line isn't a right-side draft.
         let left = PendingComment {
-            side: DiffSide::Left,
+            side: Some(DiffSide::Left),
             ..comment.clone()
         };
         assert!(present(&drafts[..1], std::slice::from_ref(&left)).is_empty());
@@ -2567,7 +2554,14 @@ mod tests {
             ..twin("l")
         };
         let both = [left_draft.clone(), twin("r")];
-        assert_eq!(present(&both, &[comment, left]), both);
+        assert_eq!(present(&both, &[comment.clone(), left]), both);
+
+        // GitHub left out the original range: the current one stands in.
+        let unoriginal = PendingComment {
+            original_line: None,
+            ..comment
+        };
+        assert_eq!(present(&drafts[..1], &[unoriginal]), [twin("a")]);
     }
 
     #[test]
@@ -2594,6 +2588,42 @@ mod tests {
             message.contains("on commit 1234567") && message.ends_with("u#r"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn an_added_lines_comment_isnt_the_removed_lines_draft() {
+        // The same text on removed line 12 and added line 12. The left comment was
+        // deleted on github.com, so the review holds only the right one.
+        let right = DraftComment {
+            body: "Same".into(),
+            ..draft("r", None)
+        };
+        let left = DraftComment {
+            id: "l".into(),
+            side: DiffSide::Left,
+            ..right.clone()
+        };
+        let added = pending("src/pr.rs", Some(12), None, Some(DiffSide::Right), "Same");
+        let drafts = [left.clone(), right.clone()];
+        assert_eq!(present(&drafts, std::slice::from_ref(&added)), [right]);
+        assert_eq!(missing(&drafts, &[added]), [&left]);
+
+        let side = |hunk: &str| {
+            pending_comment(PendingCommentNode {
+                path: "src/pr.rs".into(),
+                line: Some(12),
+                start_line: None,
+                original_line: Some(12),
+                original_start_line: None,
+                body: "Same".into(),
+                diff_hunk: hunk.into(),
+            })
+            .side
+        };
+        assert_eq!(side("@@ -12 +12 @@\n-old\r\n+new\r"), Some(DiffSide::Right));
+        assert_eq!(side("@@ -12 +12 @@\n-old"), Some(DiffSide::Left));
+        assert_eq!(side("@@ -12 +12 @@\n same"), None);
+        assert_eq!(side(""), None);
     }
 
     #[test]
