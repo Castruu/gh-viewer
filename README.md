@@ -60,34 +60,42 @@ There's nothing to configure in GH Viewer.
 
 ### Your review queue, one click away
 
-<img src="docs/assets/screenshots/menu-bar.png" width="380" align="right" alt="The menu bar list: PRs waiting on your review and your own PRs, with review and CI status">
+<img src="docs/assets/screenshots/menu-bar.png" width="380" align="right" alt="The menu bar list: PRs waiting on your review and your own PRs, each with its repo, age and status">
 
 The menu bar shows the PRs that wait on your review (the icon shows how many)
-and your own open PRs, with their review decision and CI status. Click one to
-review it, right-click to open it in your browser.
+and your own open PRs, five of each, with a link to the window for the rest.
+Click one to review it, right-click to open it in your browser.
+
+Each row says what the PR does, then its repo, number and age. A status shows
+only when there is news: Checks failing, Changes requested, Draft, Approved or
+Checks running.
 
 It refreshes every 2 minutes, and when you open the menu if the data is more
 than 30 seconds old. **⌘R** refreshes now.
 
-Each PR says its state in words: Draft, Approved, Changes requested, Checks failing
-or Checks running. A PR with nothing to report shows nothing.
-
 Colors follow the theme you pick in Settings (**⌘,** with the review window open):
-Cool, Soft, Focus or Vivid, in light or dark. Settings also has four app icons to pick from
-for the Dock.
+Cool, Soft, Focus or Vivid, in light or dark. Settings also has four app icons
+to pick from for the Dock.
 
 <br clear="right">
 
 ### A diff that keeps up with you
 
-<img src="docs/assets/screenshots/review-window.png" alt="The review window: PRs grouped by repo, the changed files and the diff">
+<img src="docs/assets/screenshots/review-window.png" alt="The review window: PRs grouped by what they need, the diff, and the agent chat">
 
-- Your PRs grouped by what they need: your review, your own, and the ones you've already reviewed.
-- The window opens on the first PR waiting on you, and moves to the next one after you submit a review.
-- The sidebar switches between your pull requests and the open one's files, as a folder tree. Its filter button hides the sections or the viewed files you don't need to see. Hover a diff line for the "+", click it to comment or ask the agent.
+- The sidebar lists your PRs by what they need: your review, your own, and the
+  ones you've already reviewed. Its second tab shows the open PR's files as a
+  folder tree.
+- The filter button next to the tabs hides the sections, or the viewed files,
+  you don't need to see.
+- The window opens on the PR you had open last, or the first one waiting on
+  you, and moves to the next one after you submit a review.
+- Hover a diff line for the "+", then click the line to comment on it or ask
+  the agent about it.
 - A unified diff computed from a local checkout, not fetched from GitHub's API.
 - "Viewed" checkboxes sync with GitHub. Viewed and very large files start collapsed.
 - Review threads from GitHub, placed on the lines they're about.
+- The agent chat sits beside the diff. Close it from the toolbar and it stays closed.
 
 ### An agent that has read the code
 
