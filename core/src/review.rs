@@ -54,7 +54,12 @@ struct SessionInfo {
     endpoint: McpEndpoint,
     /// Whether the PR description has been sent; later prompts skip it.
     primed: bool,
+    /// Shared with the session's `PrTools`.
+    turn_head: TurnHead,
 }
+
+/// The head the agent's current turn read, set by `ask`. Drafts on another head are refused.
+type TurnHead = Arc<Mutex<String>>;
 
 #[uniffi::export(async_runtime = "tokio")]
 impl ReviewHub {
@@ -109,10 +114,12 @@ impl ReviewHub {
         let key = (repo, number);
         let review = self.review(&key)?;
         let mcp = self.mcp.get_or_try_init(McpServer::start).await?;
+        let turn_head = TurnHead::default();
         let endpoint = mcp.register(Arc::new(PrTools {
             review: review.clone(),
             drafts: self.drafts.clone(),
             agent_name: agent_name(kind).into(),
+            turn_head: turn_head.clone(),
         }));
         let worktree = review.read().unwrap().checkout.worktree_path.clone();
         let server = McpServerHttp {
@@ -125,7 +132,7 @@ impl ReviewHub {
         };
         match self.agents.new_session(kind, worktree, vec![server]).await {
             Ok(session_id) => {
-                let info = SessionInfo { key, endpoint, primed: false };
+                let info = SessionInfo { key, endpoint, primed: false, turn_head };
                 self.sessions.lock().unwrap().insert(session_id.clone(), info);
                 Ok(session_id)
             }
@@ -144,16 +151,17 @@ impl ReviewHub {
         selection: Option<Selection>,
         question: String,
     ) -> Result<String, CoreError> {
-        let (key, primed) = {
+        let (key, primed, turn_head) = {
             let mut sessions = self.sessions.lock().unwrap();
             let info = sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| CoreError::Agent("This agent session has ended. Start a new one.".into()))?;
-            (info.key.clone(), std::mem::replace(&mut info.primed, true))
+            (info.key.clone(), std::mem::replace(&mut info.primed, true), info.turn_head.clone())
         };
         let text = {
             let review = self.review(&key)?;
             let review = review.read().unwrap();
+            *turn_head.lock().unwrap() = review.checkout.head_oid.clone();
             build_prompt(&review, !primed, selection.as_ref(), &question)
         };
         self.agents.prompt(session_id, text).await
@@ -237,6 +245,7 @@ struct PrTools {
     review: Arc<RwLock<OpenedReview>>,
     drafts: Arc<DraftStore>,
     agent_name: String,
+    turn_head: TurnHead,
 }
 
 impl ReviewTools for PrTools {
@@ -287,6 +296,16 @@ impl ReviewTools for PrTools {
 
     fn draft_comment(&self, args: DraftCommentArgs) -> Result<String, String> {
         let review = self.review.read().unwrap();
+        let head = &review.checkout.head_oid;
+        // A reload mid-turn can put other code under the same line numbers. Refused
+        // once: the error tells the agent, so its retry after re-reading is on `head`.
+        let read = std::mem::replace(&mut *self.turn_head.lock().unwrap(), head.clone());
+        if read != *head {
+            return Err(format!(
+                "The PR changed since you read it (now {}). Re-read the file and draft again.",
+                short(head)
+            ));
+        }
         validate_draft(&review.files, &args)?;
         let draft = NewDraft {
             path: args.path.clone(),
@@ -723,6 +742,7 @@ mod tests {
             review: Arc::new(RwLock::new(review())),
             drafts: drafts.clone(),
             agent_name: "Claude".into(),
+            turn_head: Arc::new(Mutex::new("b".repeat(40))),
         };
         tools.draft_comment(args(12, DiffSide::Right, None)).unwrap();
         assert!(tools.draft_comment(args(99, DiffSide::Right, None)).is_err());
@@ -733,5 +753,26 @@ mod tests {
         assert_eq!(stored[0].commit_oid, "b".repeat(40));
         assert_eq!(tools.review_threads(Some("other.rs".into())), serde_json::json!([]));
         assert_eq!(tools.pr_context()["files"][0]["additions"], 2);
+    }
+
+    #[test]
+    fn refuses_drafts_after_a_reload_moved_the_pr_mid_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let drafts = Arc::new(DraftStore::new(dir.path().to_string_lossy().into_owned()));
+        let review = Arc::new(RwLock::new(review()));
+        let tools = PrTools {
+            review: review.clone(),
+            drafts: drafts.clone(),
+            agent_name: "Claude".into(),
+            turn_head: Arc::new(Mutex::new("b".repeat(40))),
+        };
+        review.write().unwrap().checkout.head_oid = "d".repeat(40);
+
+        let error = tools.draft_comment(args(12, DiffSide::Right, None)).unwrap_err();
+        assert_eq!(error, "The PR changed since you read it (now ddddddd). Re-read the file and draft again.");
+        assert!(drafts.list("o/r".into(), 7).unwrap().is_empty());
+        // Told about the new head, the agent can draft on it.
+        tools.draft_comment(args(12, DiffSide::Right, None)).unwrap();
+        assert_eq!(drafts.list("o/r".into(), 7).unwrap()[0].commit_oid, "d".repeat(40));
     }
 }
