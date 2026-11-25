@@ -3,6 +3,8 @@ import SwiftUI
 /// The open PR's changed files as a folder tree, in the sidebar. Clicking a file scrolls the diff to it.
 struct DiffFileList: View {
     let review: PRReview
+    /// The sidebar's filter: leave out the files already checked as viewed.
+    var hidesViewed = false
     @State private var selection: String?
     /// Folder paths, each ending in "/".
     @State private var collapsed: Set<String> = []
@@ -14,7 +16,7 @@ struct DiffFileList: View {
             let viewed = review.viewedPaths
             let byPath = Dictionary(files.map { ($0.path, $0) }) { first, _ in first }
             // The tree is rebuilt on each redraw, which is nothing for hundreds of files; cache it if a PR with thousands drags.
-            let rows = fileTree(of: files.map(\.path)).filter { row in
+            let rows = fileTree(of: files.map(\.path).filter { !hidesViewed || !viewed.contains($0) }).filter { row in
                 !collapsed.contains { row.path.hasPrefix($0) && row.path != $0 }
             }
             List(rows, selection: Binding(get: { selection }, set: { path in
@@ -42,6 +44,12 @@ struct DiffFileList: View {
                         DiffFileRow(file: file, draftCount: draftCounts[path] ?? 0, isViewed: viewed.contains(path))
                             .padding(.leading, CGFloat(depth) * Self.indent)
                     }
+                }
+            }
+            .overlay {
+                if rows.isEmpty {
+                    ContentUnavailableView("All Files Viewed", systemImage: "checkmark.circle",
+                                           description: Text("The filter hides viewed files."))
                 }
             }
         } else {
