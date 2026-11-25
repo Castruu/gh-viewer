@@ -542,7 +542,7 @@ fn build_prompt(review: &OpenedReview, include_pr: bool, selection: Option<&Sele
         );
         let _ = writeln!(
             text,
-            "\nYou have gh-viewer tools: get_pr_context, list_review_threads, and draft_comment. Only draft comments when I ask you to; drafts go to me for review before anything is posted."
+            "\nYou have GH Viewer review tools (MCP server `ghv-…`): get_pr_context, list_review_threads, and draft_comment. Only draft comments when I ask you to; drafts go to me for review before anything is posted."
         );
     }
     if let Some(selection) = selection {
