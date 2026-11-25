@@ -431,11 +431,23 @@ fn is_oid(oid: &str) -> bool {
 
 /// Path to the git binary, or plain "git" for a PATH lookup.
 fn git_path() -> &'static str {
-    GIT_CANDIDATES
+    static GIT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        let found = GIT_CANDIDATES.iter().copied().filter(|path| Path::new(path).exists()).map(|path| {
+            let output = std::process::Command::new(path).arg("--version").output();
+            (path, output.map(|out| String::from_utf8_lossy(&out.stdout).into_owned()).unwrap_or_default())
+        });
+        choose_git(found.collect()).unwrap_or("git")
+    })
+}
+
+/// The first of the found gits (path, `git --version` output) new enough for
+/// the sparse checkout, else the first found, whose error then names it.
+fn choose_git(found: Vec<(&'static str, String)>) -> Option<&'static str> {
+    let new_enough = found
         .iter()
-        .copied()
-        .find(|path| Path::new(path).exists())
-        .unwrap_or("git")
+        .find(|(_, version)| version.starts_with("git version ") && too_old_for_sparse(version).is_none());
+    new_enough.or(found.first()).map(|(path, _)| *path)
 }
 
 /// Runs git with auth through gh and without the user's config. Returns stdout,
@@ -1145,6 +1157,17 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
             assert!(std::fs::symlink_metadata(format!("{wt}/{hidden}")).is_err(), "{hidden}");
         }
         assert_eq!(read(&wt, "cfg/config.toml"), "[mcp_servers.x]\n");
+    }
+
+    #[test]
+    fn prefers_a_git_new_enough_for_sparse_checkout() {
+        let old = ("/opt/homebrew/bin/git", "git version 2.30.1\n".to_string());
+        let new = ("/usr/bin/git", "git version 2.50.1 (Apple Git-155)\n".to_string());
+        assert_eq!(choose_git(vec![old.clone(), new.clone()]), Some("/usr/bin/git"));
+        assert_eq!(choose_git(vec![new, old.clone()]), Some("/usr/bin/git"));
+        // None is new enough: the first, so the error names it.
+        assert_eq!(choose_git(vec![old, ("/usr/local/bin/git", String::new())]), Some("/opt/homebrew/bin/git"));
+        assert_eq!(choose_git(vec![]), None);
     }
 
     #[test]
