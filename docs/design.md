@@ -64,6 +64,7 @@ All of this lives under `~/Library/Application Support/GHViewer/`:
 repos/<owner>/<name>.git            bare, blobless clone (--filter=blob:none)
 worktrees/<owner>/<name>/<number>/  detached worktree at the PR head
 drafts/<owner>/<name>/<number>.json unsent review comments (survive restarts)
+drafts/<owner>/<name>/<number>.submit.json a submit that hasn't been settled
 ```
 
 ## Flows
@@ -101,15 +102,22 @@ the comment to the PR's local drafts, and the UI shows it right away. The agent
 can never post to GitHub.
 
 **Submit.** Two steps, so a retry after a lost answer never posts a review
-twice. First the drafts go into a pending review: `addPullRequestReview`
-without an event starts one with `commitOID` set to the drafts' pinned commit
-and every draft as a `DraftPullRequestReviewThread`. If you already have a
-pending review on GitHub, each draft is added to it with
-`addPullRequestReviewThread` instead, skipping any already there. The pending
-review's id is saved on the drafts. Then `submitPullRequestReview` submits it
-with the event and body. A retry that finds no pending review checks the saved
-one: if it was submitted, the submit is done. Drafts are deleted only after
-GitHub accepts the review, and drafts added meanwhile stay.
+twice. Only the drafts the submit sheet showed go out. First they go into a
+pending review: `addPullRequestReview` without an event starts one with
+`commitOID` set to the drafts' pinned commit and every draft as a
+`DraftPullRequestReviewThread`. If you already have a pending review on
+GitHub, each draft is added to it with `addPullRequestReviewThread` instead,
+skipping any already there. Next, a submit record (the review's id, commit,
+event, body and the drafts as sent) is saved next to the drafts. Then
+`submitPullRequestReview` submits the review with the event and body.
+
+A retry with a record looks that review up first. If it was submitted, the
+submit is done, or fails naming what was posted when the new submit differs.
+If it's pending, only that review is continued. A lookup error keeps the
+record. If GitHub refuses the final step, a review the attempt started is
+deleted. Drafts are deleted only after GitHub accepts the review, matched by id
+and content, and drafts added meanwhile stay. Submits for one PR run one at a
+time.
 
 **Permissions.** ACP `session/request_permission` shows up as a prompt in the
 chat with the agent's own options. The app answers only what you pick, or
