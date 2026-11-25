@@ -261,7 +261,8 @@ impl AgentHub {
                 .await
                 .map_err(|_| {
                     CoreError::Agent(format!(
-                        "{} didn't open a session within {}s.{}",
+                        // Seen when a hook in ~/Documents waits on macOS's folder access prompt.
+                        "{} didn't open a session within {}s. If macOS asked GH Viewer for access to a folder, answer it, then try again.{}",
                         kind.name(),
                         SETUP_TIMEOUT.as_secs(),
                         process.stderr.tail()

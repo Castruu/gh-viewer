@@ -127,6 +127,16 @@ kind, with one ACP session per PR. The app tells the agent it offers no
 file-system or terminal capabilities, so agents use their built-in tools inside
 the worktree.
 
+The worktree holds the PR author's code, and agents read config from their cwd.
+So worktrees are sparse checkouts without `/.claude/`, `/.codex/` and
+`/.mcp.json`, and Claude sessions load only the user's own settings
+(`settingSources: ["user"]`). Otherwise a PR's hooks and MCP servers would run
+on the reviewer's machine; codex-acp trusts every session root, so Codex would
+load the PR's `.codex/config.toml`.
+
+Stop sends `session/cancel`. If the agent hasn't ended the turn 5 s later, the
+core stops waiting and reports it as cancelled.
+
 ## Not in v1
 
 - Structural diff and split view (decision 3).

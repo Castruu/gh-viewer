@@ -57,6 +57,11 @@ scripts/build.sh --open   # builds, quits any running copy and launches it
 To keep it around, copy `build/GHViewer.app` to `/Applications`. The build is
 ad-hoc signed, which is fine for running on the machine that built it.
 
+Agents run as part of GH Viewer, so macOS asks GH Viewer for access when your
+agent or one of its hooks reads a protected folder such as `~/Documents`. The
+agent waits until you answer. An ad-hoc signature changes with every build, so
+each new build asks again.
+
 For development, `open build/GHViewer.app --args --open-review-window [<PR URL>]`
 opens the review window at launch, optionally with a PR from your lists selected.
 
