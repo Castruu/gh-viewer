@@ -396,12 +396,17 @@ const SPARSE_MIN_GIT: (u32, u32) = (2, 35);
 
 /// The version in `git --version` output, if it's older than [`SPARSE_MIN_GIT`].
 fn too_old_for_sparse(output: &str) -> Option<String> {
+    let (number, version) = git_version(output)?;
+    (number < SPARSE_MIN_GIT).then(|| version.to_owned())
+}
+
+/// (major, minor) and the version from `git --version` output.
+fn git_version(output: &str) -> Option<((u32, u32), &str)> {
     let version = output.trim().strip_prefix("git version ")?.split(' ').next()?;
-    let mut parts = version.split('.').map(|part| part.parse::<u32>().ok());
-    let (Some(major), Some(minor)) = (parts.next()?, parts.next()?) else {
-        return None;
-    };
-    ((major, minor) < SPARSE_MIN_GIT).then(|| version.to_owned())
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some(((major, minor), version))
 }
 
 /// What agents read as config from the root of their cwd.
@@ -439,21 +444,34 @@ fn is_oid(oid: &str) -> bool {
 fn git_path() -> &'static str {
     static GIT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     GIT.get_or_init(|| {
-        let found = GIT_CANDIDATES.iter().copied().filter(|path| Path::new(path).exists()).map(|path| {
-            let output = std::process::Command::new(path).arg("--version").output();
-            (path, output.map(|out| String::from_utf8_lossy(&out.stdout).into_owned()).unwrap_or_default())
-        });
-        choose_git(found.collect()).unwrap_or("git")
+        let version = |path: &str| {
+            if path.contains('/') && !Path::new(path).exists() {
+                return None;
+            }
+            let output = std::process::Command::new(path).arg("--version").output().ok()?;
+            output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        choose_git(GIT_CANDIDATES.iter().copied().chain(["git"]), version)
     })
 }
 
-/// The first of the found gits (path, `git --version` output) new enough for
-/// the sparse checkout, else the first found, whose error then names it.
-fn choose_git(found: Vec<(&'static str, String)>) -> Option<&'static str> {
-    let new_enough = found
-        .iter()
-        .find(|(_, version)| version.starts_with("git version ") && too_old_for_sparse(version).is_none());
-    new_enough.or(found.first()).map(|(path, _)| *path)
+/// Asks each candidate's `git --version` in order and stops at the first that
+/// is 2.35 or newer, so a later one isn't run at all (/usr/bin/git can open
+/// macOS's developer tools install dialog). Without one, the first that ran,
+/// which the sparse checkout error then names.
+fn choose_git(
+    candidates: impl Iterator<Item = &'static str>,
+    version: impl Fn(&str) -> Option<String>,
+) -> &'static str {
+    let mut first_ran = None;
+    for path in candidates {
+        let Some(output) = version(path) else { continue };
+        if git_version(&output).is_some_and(|(number, _)| number >= SPARSE_MIN_GIT) {
+            return path;
+        }
+        first_ran.get_or_insert(path);
+    }
+    first_ran.unwrap_or("git")
 }
 
 /// Runs git with auth through gh and without the user's config. Returns stdout,
@@ -1178,14 +1196,31 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
     }
 
     #[test]
-    fn prefers_a_git_new_enough_for_sparse_checkout() {
-        let old = ("/opt/homebrew/bin/git", "git version 2.30.1\n".to_string());
-        let new = ("/usr/bin/git", "git version 2.50.1 (Apple Git-155)\n".to_string());
-        assert_eq!(choose_git(vec![old.clone(), new.clone()]), Some("/usr/bin/git"));
-        assert_eq!(choose_git(vec![new, old.clone()]), Some("/usr/bin/git"));
-        // None is new enough: the first, so the error names it.
-        assert_eq!(choose_git(vec![old, ("/usr/local/bin/git", String::new())]), Some("/opt/homebrew/bin/git"));
-        assert_eq!(choose_git(vec![]), None);
+    fn picks_the_first_git_new_enough_without_running_later_ones() {
+        let versions = [
+            ("/opt/homebrew/bin/git", Some("git version 2.30.1\n")),
+            ("/usr/local/bin/git", None),
+            ("/usr/bin/git", Some("git version 2.50.1 (Apple Git-155)\n")),
+            ("git", Some("git version 2.51.0\n")),
+        ];
+        let choose = |order: &[&'static str]| {
+            let asked = std::cell::RefCell::new(Vec::new());
+            let version = |path: &str| {
+                asked.borrow_mut().push(path.to_owned());
+                versions.iter().find(|(candidate, _)| *candidate == path)?.1.map(str::to_owned)
+            };
+            let chosen = choose_git(order.iter().copied(), version);
+            (chosen, asked.into_inner())
+        };
+        // Too old, missing, then new enough: plain `git` is never run.
+        let (chosen, asked) = choose(&["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git", "git"]);
+        assert_eq!((chosen, asked.len()), ("/usr/bin/git", 3));
+        // A new enough first candidate stops the probing.
+        assert_eq!(choose(&["git", "/usr/bin/git"]), ("git", vec!["git".to_owned()]));
+        // None is new enough: the first that ran, so the error names it.
+        assert_eq!(choose(&["/usr/local/bin/git", "/opt/homebrew/bin/git"]).0, "/opt/homebrew/bin/git");
+        assert_eq!(choose(&[]).0, "git");
+        assert_eq!(git_version("git version 2.x"), None);
     }
 
     #[test]
