@@ -1369,23 +1369,31 @@ fn save(path: &Path, drafts: &[DraftComment]) -> Result<(), CoreError> {
 }
 
 /// Writes a temp file and renames it over the old one, so a crash mid-write
-/// can't leave a truncated file. `None` deletes the file.
+/// can't leave a truncated file. `None` deletes the file. Either way the change
+/// is on disk when this returns, even through a power loss.
 fn write_file(path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
     let storage =
         |e: io::Error| CoreError::Storage(format!("couldn't save {}: {e}", path.display()));
-    let Some(json) = json else {
-        return match fs::remove_file(path) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(storage(e)),
-            _ => Ok(()),
-        };
-    };
-    let tmp = path.with_extension("json.tmp");
-    fs::create_dir_all(path.parent().expect("draft paths have a parent")).map_err(storage)?;
-    let mut file = fs::File::create(&tmp).map_err(storage)?;
-    file.write_all(&json)
-        .and_then(|()| file.sync_all())
-        .map_err(storage)?;
-    fs::rename(&tmp, path).map_err(storage)
+    let dir = path.parent().expect("draft paths have a parent");
+    match json {
+        Some(json) => {
+            let tmp = path.with_extension("json.tmp");
+            fs::create_dir_all(dir).map_err(storage)?;
+            let mut file = fs::File::create(&tmp).map_err(storage)?;
+            file.write_all(&json)
+                .and_then(|()| file.sync_all())
+                .map_err(storage)?;
+            fs::rename(&tmp, path).map_err(storage)?;
+        }
+        None => match fs::remove_file(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            result => result.map_err(storage)?,
+        },
+    }
+    // The rename or unlink is an entry in the directory, so sync that too.
+    fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(storage)
 }
 
 fn position(drafts: &[DraftComment], id: &str) -> Result<usize, CoreError> {
