@@ -255,6 +255,11 @@ final class PRReview {
         }
         if opened == nil {
             await load()
+            // load() returns at once while another load runs, such as the diff's first one.
+            // shortcut: polls; await a stored load Task instead if more callers need this.
+            while opened == nil && loadState == .loading {
+                try await Task.sleep(for: .milliseconds(100))
+            }
         }
         chat.isStarting = true
         defer { chat.isStarting = false }
