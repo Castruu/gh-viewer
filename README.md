@@ -1,71 +1,148 @@
-# GH Viewer
+<p align="center">
+  <img src="docs/assets/icon.svg" width="128" height="128" alt="GH Viewer icon">
+</p>
 
-A macOS app for reviewing pull requests on github.com, with your own coding
-agent beside the diff.
+<h1 align="center">GH Viewer</h1>
 
-- **Menu bar**: the PRs waiting on your review (the icon shows how many) and
-  your own open PRs, with review decision and CI status. Click a PR to open it
-  in the review window. Right-click to open it in your browser.
-- **Review window**: your PRs grouped by repo, including ones you've already
-  reviewed. Each PR shows a unified diff computed from a local checkout.
-  "Viewed" checkboxes sync with GitHub.
-- **Comments**: select lines to draft review comments, then submit them as one
-  review (comment, approve or request changes). Drafts are saved locally until
-  you submit.
-- **Agent chat**: ask Claude Code or Codex about the selected lines. The agent
-  runs in a checkout of the PR, so it can read callers and run things. Ask it to
-  review the changes and it drafts comments for you to edit or discard. Nothing
-  is posted until you submit.
-- Refreshes every 2 minutes, and whenever you open the menu if the data is
-  more than 30 seconds old. ⌘R refreshes manually.
+<p align="center">
+  <strong>Review GitHub pull requests in a native Mac app, with your coding agent beside the diff.</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Rust%20%2B%20SwiftUI-orange" alt="Rust + SwiftUI">
+  <img src="https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-6E56CF" alt="Agents: Claude Code, Codex">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#privacy-and-safety">Privacy</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#development">Development</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshots/agent-chat.png" alt="GH Viewer: a pull request's diff with Claude answering a question about the selected lines">
+</p>
+
+GH Viewer lives in your menu bar and shows the pull requests waiting on you.
+Open one and you get a fast, native diff from a local checkout, with Claude Code
+or Codex next to it. Select lines and ask about them: the agent runs in the PR's
+checkout, so it can read the callers and run the tests. Ask it to review the
+changes and it drafts comments for you to edit or throw away. Nothing reaches
+GitHub until you submit.
+
+## Quick start
+
+You need macOS 14 or later and the [GitHub CLI](https://cli.github.com), signed in.
+
+```sh
+brew install gh && gh auth login       # once
+xcode-select --install                 # once, if you don't have the Command Line Tools
+curl https://sh.rustup.rs -sSf | sh    # once, if you don't have Rust
+
+git clone https://github.com/Castruu/gh-viewer.git
+cd gh-viewer
+scripts/build.sh --open
+```
+
+The icon appears in your menu bar with the number of PRs waiting on your review.
+Click a PR to open it, or press **⌘O** in the menu for the review window.
+To keep the app, copy `build/GHViewer.app` to `/Applications`.
+
+For the agent chat, also install [Node.js](https://nodejs.org) and sign in to
+[Claude Code](https://code.claude.com) and/or [Codex](https://github.com/openai/codex).
+There's nothing to configure in GH Viewer.
+
+## Features
+
+### Your review queue, one click away
+
+<img src="docs/assets/screenshots/menu-bar.png" width="380" align="right" alt="The menu bar list: PRs waiting on your review and your own PRs, with review and CI status">
+
+The menu bar shows the PRs that wait on your review (the icon shows how many)
+and your own open PRs, with their review decision and CI status. Click one to
+review it, right-click to open it in your browser.
+
+It refreshes every 2 minutes, and when you open the menu if the data is more
+than 30 seconds old. **⌘R** refreshes now.
 
 | Icon | Meaning |
 |---|---|
-| green check | Approved |
-| red cross | Changes requested |
-| orange clock | Review required |
+| check | Approved |
+| cross | Changes requested |
+| clock | Review required |
 | dashed circle | No review decision yet |
-| green / red / yellow dot | Checks passed / failed / running |
+| dot | Checks passed, failed or running |
 
-## Requirements
+Colors follow the theme you pick: Cool, Soft, Focus or Vivid, in light or dark.
 
-- macOS 14 or later
-- [GitHub CLI](https://cli.github.com), signed in: `brew install gh && gh auth login`.
-  The app reads the token from `gh auth token` on each refresh and never stores it.
-- Rust (stable) and the Xcode Command Line Tools (`xcode-select --install`) to build.
-  Full Xcode is not required.
-- For the agent chat: Node.js (`npx`) plus [Claude Code](https://code.claude.com)
-  and/or [Codex](https://github.com/openai/codex), installed and signed in
-  yourself. GH Viewer starts them through their
-  [ACP](https://agentclientprotocol.com) adapters
+<br clear="right">
+
+### A diff that keeps up with you
+
+<img src="docs/assets/screenshots/review-window.png" alt="The review window: PRs grouped by repo, the changed files and the diff">
+
+- Your PRs grouped by repo, including the ones you've already reviewed.
+- A unified diff computed from a local checkout, not fetched from GitHub's API.
+- "Viewed" checkboxes sync with GitHub. Viewed and very large files start collapsed.
+- Review threads from GitHub, placed on the lines they're about.
+
+### An agent that has read the code
+
+- Select lines and ask Claude Code or Codex about them, or start from
+  _Summarize this PR_, _What could break?_ or _Review the changes and draft
+  comments_.
+- The agent works in a checkout of the PR, with your own login and permission
+  settings. It can open other files, follow callers and run commands.
+- Switch between Claude and Codex per question.
+
+### Comments you control
+
+<img src="docs/assets/screenshots/drafts.png" alt="A draft review comment written by the agent, shown inline in the diff">
+
+<img src="docs/assets/screenshots/submit.png" width="420" align="right" alt="The Submit Review sheet, listing the draft Claude wrote">
+
+- Select lines to draft a comment yourself, or let the agent draft them.
+- Drafts are saved locally until you submit. Edit or delete any of them.
+- Submit them as one review: comment, approve or request changes.
+- Agent drafts are labeled as such, here and in the diff, so you check them
+  before they go out.
+
+<br clear="right">
+
+## Privacy and safety
+
+- **No token storage.** GH Viewer reads your token from `gh auth token` on each
+  refresh and never stores it.
+- **No agent credentials.** Claude Code and Codex run with your own logins,
+  through their [ACP](https://agentclientprotocol.com) adapters
   (`@agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`).
-  It never handles agent credentials, and each agent's own permission settings
-  apply. GH Viewer's own review tools are the one exception: they're allowed
-  automatically.
+  Each agent's own permission settings apply. GH Viewer's review tools are the
+  one exception, allowed automatically: they read the PR and its review threads,
+  and write drafts on your Mac.
+- **Nothing is posted until you submit.** Agent drafts stay on your Mac.
+- **Your data stays local.** Clones, per-PR worktrees, drafts and chats live in
+  `~/Library/Application Support/GHViewer`. To reclaim disk space, delete the
+  `repos` and `worktrees` folders there while the app isn't running.
 
-GH Viewer keeps its clones, per-PR worktrees and drafts in
-`~/Library/Application Support/GHViewer`. To reclaim disk space, delete the
-`repos` and `worktrees` folders there while the app isn't running.
+## How it works
 
-## Build and run
-
-```sh
-scripts/build.sh          # builds build/GHViewer.app
-scripts/build.sh --open   # builds, quits any running copy and launches it
 ```
-
-To keep it around, copy `build/GHViewer.app` to `/Applications`. The build is
-ad-hoc signed, which is fine for running on the machine that built it.
-
-Agents run as part of GH Viewer, so macOS asks GH Viewer for access when your
-agent or one of its hooks reads a protected folder such as `~/Documents`. The
-agent waits until you answer. An ad-hoc signature changes with every build, so
-each new build asks again.
-
-For development, `open build/GHViewer.app --args --open-review-window [<PR URL>]`
-opens the review window at launch, optionally with a PR from your lists selected.
-
-## Architecture
+             menu bar + review window (SwiftUI)
+                            │  UniFFI
+                            ▼
+                    ghv_core (Rust)
+     ┌──────────────┬───────┴──────┬─────────────────┐
+     ▼              ▼              ▼                 ▼
+ GitHub GraphQL   git clone +    ACP client ──▶  Claude Code / Codex
+ (token from gh)  worktree       (agent.rs)          │
+ lib.rs, pr.rs    per PR                             │ review tools
+                  checkout.rs    MCP server ◀────────┘
+                                 on localhost (mcp.rs)
+```
 
 ```
 app/    SwiftUI app (menu bar + review window). Thin: UI and state only.
@@ -81,11 +158,42 @@ uniffi-bindgen/  Generates the Swift bindings for core.
 scripts/build.sh  cargo build -> generate bindings -> swift build -> .app bundle
 ```
 
+## FAQ
+
+**macOS asks GH Viewer for access to my Documents folder.**
+Agents run as part of GH Viewer, so macOS asks GH Viewer when your agent or one
+of its hooks reads a protected folder such as `~/Documents`. The agent waits
+until you answer. The build is ad-hoc signed and that signature changes with
+every build, so each new build asks again.
+
+**Can I use it on a machine other than the one that built it?**
+The ad-hoc signature is fine for running on the machine that built it. There
+are no signed releases yet.
+
+**Does it work with GitHub Enterprise?**
+Not yet: it talks to github.com.
+
+## Development
+
+Requirements: Rust (stable) and the Xcode Command Line Tools
+(`xcode-select --install`). Full Xcode is not required.
+
+```sh
+scripts/build.sh          # builds build/GHViewer.app
+scripts/build.sh --open   # builds, quits any running copy and launches it
+```
+
 The build script generates `app/Sources/ghv_coreFFI`, `app/Sources/GHViewer/Generated`
 and `app/RustLib`. They're git-ignored, so run the script before `swift build`
 or opening `app/` in an editor.
 
-## Tests
+`open build/GHViewer.app --args --open-review-window [<PR URL>]` opens the
+review window at launch, optionally with a PR from your lists selected.
+
+The app icon's source is `docs/assets/icon.svg`; `app/AppIcon.icns` is rendered
+from it.
+
+### Tests
 
 ```sh
 cargo test -p ghv_core                    # unit and local integration tests
