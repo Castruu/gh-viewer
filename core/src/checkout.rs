@@ -238,6 +238,12 @@ impl CheckoutManager {
         } else {
             None
         };
+        // A creation stopped between `worktree add --no-checkout` and the checkout
+        // leaves the head set but no index: its files were never checked out.
+        let checked_out = current.is_some()
+            && git(&["-C", wt, "rev-parse", "--git-path", "index"])
+                .await
+                .is_ok_and(|index| Path::new(wt).join(index.trim()).exists());
         let checkout_error =
             || remote_error(&repo, format!("Couldn't check out PR #{number} of {repo}"));
         if current.is_none() {
@@ -270,7 +276,7 @@ impl CheckoutManager {
         // Already at the head: keep whatever the agent changed. Otherwise local edits
         // are discarded on purpose: the worktree is the agent's scratch space. No
         // `git clean`, so untracked build caches survive.
-        if current.as_deref().map(str::trim) != Some(head_oid.as_str()) {
+        if !checked_out || current.as_deref().map(str::trim) != Some(head_oid.as_str()) {
             git(&["-C", wt, "checkout", "--quiet", "--force", "--detach", &head_oid])
                 .await
                 .map_err(checkout_error())?;
@@ -1147,6 +1153,18 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
                 assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
             }
         }
+
+        // A creation interrupted after `worktree add --no-checkout` is finished.
+        let bare = format!("{tmp}/data/repos/octo/demo.git");
+        let wt1 = format!("{tmp}/data/worktrees/octo/demo/1");
+        let head1 = run(&wt1, &["rev-parse", "HEAD"]);
+        std::fs::remove_dir_all(&wt1).unwrap();
+        run(&bare, &["worktree", "prune"]);
+        run(&bare, &["worktree", "add", "-q", "--no-checkout", "--detach", &wt1, &head1]);
+        assert!(!Path::new(&format!("{wt1}/a.txt")).exists());
+        manager.prepare("octo/demo".into(), 1, "main".into(), None).await.unwrap();
+        assert_eq!(read(&wt1, "a.txt"), "one\n");
+        assert!(std::fs::symlink_metadata(format!("{wt1}/.codex")).is_err());
 
         // A worktree deleted by hand is made again: no checkout before the patterns,
         // so the excluded paths are never written.
