@@ -352,14 +352,15 @@ impl ReviewTools for PrTools {
     }
 
     fn draft_comment(&self, args: DraftCommentArgs) -> Result<String, String> {
+        // Held until the draft is stored. `open` publishes a reload under the write
+        // lock, so the head checked here is the one the draft is stored against.
         let review = self.review.read().unwrap();
         let head = &review.checkout.head_oid;
-        // A reload mid-turn can put other code under the same line numbers. Refused
-        // once: the error tells the agent, so its retry after re-reading is on `head`.
-        let read = std::mem::replace(&mut *self.turn_head.lock().unwrap(), head.clone());
-        if read != *head {
+        // A reload mid-turn can put other code under the same line numbers. Only the
+        // next question binds the session to the new head.
+        if *self.turn_head.lock().unwrap() != *head {
             return Err(format!(
-                "The PR changed since you read it (now {}). Re-read the file and draft again.",
+                "The PR was updated (now at {}) after this question was asked, so the lines you read may have moved. Don't draft more comments in this turn; tell the reviewer, who can ask again.",
                 short(head)
             ));
         }
@@ -374,10 +375,8 @@ impl ReviewTools for PrTools {
             author: DraftAuthor::Agent { name: self.agent_name.clone() },
             commit_oid: review.checkout.head_oid.clone(),
         };
-        let (repo, number) = (review.detail.repo.clone(), review.detail.number);
-        drop(review);
         self.drafts
-            .add(repo, number, draft)
+            .add(review.detail.repo.clone(), review.detail.number, draft)
             .map(|_| format!("Drafted a comment on {}:{}. The reviewer will see it and decide whether to send it.", args.path, args.line))
             .map_err(|e| e.to_string())
     }
@@ -950,9 +949,13 @@ mod tests {
         review.write().unwrap().checkout.head_oid = "d".repeat(40);
 
         let error = tools.draft_comment(args(12, DiffSide::Right, None)).unwrap_err();
-        assert_eq!(error, "The PR changed since you read it (now ddddddd). Re-read the file and draft again.");
+        assert!(error.starts_with("The PR was updated (now at ddddddd) after this question was asked"), "{error}");
+        // A refusal doesn't bind the turn to the new head: a retry, or a call made
+        // alongside, is refused too.
+        assert!(tools.draft_comment(args(12, DiffSide::Right, None)).is_err());
         assert!(drafts.list("o/r".into(), 7).unwrap().is_empty());
-        // Told about the new head, the agent can draft on it.
+        // The next question does, as `ask` sets the head it read.
+        *tools.turn_head.lock().unwrap() = "d".repeat(40);
         tools.draft_comment(args(12, DiffSide::Right, None)).unwrap();
         assert_eq!(drafts.list("o/r".into(), 7).unwrap()[0].commit_oid, "d".repeat(40));
     }
