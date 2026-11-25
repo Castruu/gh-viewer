@@ -143,14 +143,15 @@ final class PRReview {
         await load()
     }
 
-    /// Submits the drafts as one review. On success the drafts are gone and the
+    /// Submits `drafts`, the ones the sheet showed, as one review. On success they're gone and the
     /// PR reloads at its latest head. Returns the review's URL.
     @discardableResult
-    func submit(event: ReviewEvent, body: String) async -> String? {
+    func submit(event: ReviewEvent, body: String, drafts: [DraftComment]) async -> String? {
         isSubmitting = true
         defer { isSubmitting = false }
         do {
-            let reviewURL = try await store.hub.submit(repo: repo, number: number, event: event, body: body)
+            let reviewURL = try await store.hub.submit(repo: repo, number: number, event: event, body: body,
+                                                       draftIds: drafts.map(\.id))
             reloadDrafts()
             await load()
             return reviewURL

@@ -1096,6 +1096,27 @@ impl DraftStore {
 }
 
 impl DraftStore {
+    /// The drafts with `ids`, as they are now. One added since, e.g. by an agent
+    /// after the reviewer confirmed, isn't among them and stays local.
+    pub(crate) fn confirmed(
+        &self,
+        repo: &str,
+        number: u64,
+        ids: &[String],
+    ) -> Result<Vec<DraftComment>, CoreError> {
+        let drafts = self.list(repo.to_owned(), number)?;
+        ids.iter()
+            .map(|id| {
+                drafts.iter().find(|draft| &draft.id == id).cloned().ok_or_else(|| {
+                    CoreError::Storage(
+                        "a draft you were about to submit was removed. Check the list and submit again."
+                            .into(),
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// The PR's unfinished submit, if a try stopped before it was settled.
     pub(crate) fn attempt(
         &self,
@@ -2034,6 +2055,35 @@ mod tests {
             .unwrap();
         assert_eq!(store.list("o/r".into(), 7).unwrap(), [late]);
         assert_eq!(store.attempt("o/r", 7).unwrap(), None);
+    }
+
+    #[test]
+    fn submits_only_the_confirmed_drafts_as_they_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let mine = store.add("o/r".into(), 7, new_draft("mine")).unwrap();
+        let ids = [mine.id.clone()];
+        let confirmed = store.confirmed("o/r", 7, &ids).unwrap();
+        // An agent drafts after the reviewer clicked Submit.
+        let late = store.add("o/r".into(), 7, new_draft("late")).unwrap();
+        assert_eq!(store.confirmed("o/r", 7, &ids).unwrap(), confirmed);
+        assert!(store.confirmed("o/r", 7, &["gone".into()]).is_err());
+
+        // Only a draft still as it was sent is deleted: matched by id and content.
+        store
+            .save_attempt("o/r", 7, Some(&attempt(confirmed.clone())))
+            .unwrap();
+        store
+            .update_body("o/r".into(), 7, mine.id.clone(), "edited".into())
+            .unwrap();
+        store.finish_attempt("o/r", 7, &attempt(confirmed)).unwrap();
+        let left: Vec<_> = store
+            .list("o/r".into(), 7)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.body)
+            .collect();
+        assert_eq!(left, ["edited", late.body.as_str()]);
     }
 
     #[test]

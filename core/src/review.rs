@@ -219,15 +219,17 @@ impl ReviewHub {
         self.agents.respond_permission(request_id, option_id);
     }
 
-    /// Submits the PR's drafts as one review against the commit they were
-    /// written on, then deletes the ones it sent. Returns the review's URL.
-    /// Retrying after any failure is safe: it never posts the review twice.
+    /// Submits the drafts with `draft_ids`, the ones the reviewer confirmed, as
+    /// one review against the commit they were written on, then deletes them.
+    /// Returns the review's URL. Retrying after any failure is safe: it never
+    /// posts the review twice.
     pub async fn submit(
         &self,
         repo: String,
         number: u64,
         event: ReviewEvent,
         body: String,
+        draft_ids: Vec<String>,
     ) -> Result<String, CoreError> {
         let key = (repo.clone(), number);
         let submitting = self.submits.lock().unwrap().entry(key.clone()).or_default().clone();
@@ -237,7 +239,7 @@ impl ReviewHub {
             let review = review.read().unwrap();
             (review.detail.id.clone(), review.checkout.head_oid.clone())
         };
-        let drafts = self.drafts.list(repo.clone(), number)?;
+        let drafts = self.drafts.confirmed(&repo, number, &draft_ids)?;
         let commit_oid = drafts.first().map(|d| d.commit_oid.clone()).unwrap_or(head);
         let submission = Submission { pull_request_id, commit_oid, event, body, drafts };
         self.github.submit_review(&self.drafts, &repo, number, submission).await

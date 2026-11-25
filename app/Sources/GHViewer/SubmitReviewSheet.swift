@@ -7,6 +7,8 @@ struct SubmitReviewSheet: View {
     let submitted: (String) -> Void
     @State private var event = ReviewEvent.comment
     @State private var message = ""
+    /// The drafts this sheet shows and submits, taken when it opens. One an agent adds later stays a draft.
+    @State private var confirmed: [DraftComment] = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.palette) private var palette
 
@@ -40,7 +42,7 @@ struct SubmitReviewSheet: View {
                     }
                 }
 
-            SubmitDraftSummary(drafts: review.drafts)
+            SubmitDraftSummary(drafts: confirmed)
 
             if let pending = review.pendingCommentCount, pending > 0 {
                 Label("Also submits \(countLabel(pending, "comment")) you started on github.com.", systemImage: "info.circle")
@@ -76,22 +78,29 @@ struct SubmitReviewSheet: View {
         .font(.callout)
         .padding(20)
         .frame(width: 520)
-        // An error from an earlier action doesn't belong to this submit.
-        .onAppear { review.actionError = nil }
+        .onAppear {
+            // An error from an earlier action doesn't belong to this submit.
+            review.actionError = nil
+            confirmed = review.drafts
+        }
     }
 
     /// GitHub only accepts an approval without a body or comments.
     private var isEmpty: Bool {
         event != .approve && message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && review.drafts.isEmpty && (review.pendingCommentCount ?? 0) == 0
+            && confirmed.isEmpty && (review.pendingCommentCount ?? 0) == 0
     }
 
     private func send() {
         review.actionError = nil
         Task {
-            if let url = await review.submit(event: event, body: message.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            if let url = await review.submit(event: event, body: message.trimmingCharacters(in: .whitespacesAndNewlines),
+                                             drafts: confirmed) {
                 submitted(url)
                 dismiss()
+            } else {
+                // A failed submit may have settled some drafts; show what's left before the next try.
+                confirmed = review.drafts
             }
         }
     }
