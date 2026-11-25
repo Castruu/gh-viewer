@@ -15,9 +15,17 @@ struct ChatArchive {
 
     /// The saved transcript, or nil if there is none. A file that doesn't decode is moved
     /// aside to `.corrupt`, so a later save can't overwrite it, and reported as an error.
+    /// A file that can't be read stays where it is and throws `Unreadable`; don't save over it.
     func load(repo: String, number: UInt64) throws -> Saved? {
         let url = fileURL(repo: repo, number: number)
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        } catch {
+            throw Unreadable(errorDescription: "The saved conversation couldn't be read, so it's kept as is and this chat won't be saved until it can be read or you clear it. \(error.localizedDescription)")
+        }
         do {
             let file = try Self.decoder.decode(ArchivedChat.self, from: data)
             return Saved(items: file.items.map { ChatItem(kind: $0.kind) }, savedAt: file.savedAt)
@@ -27,6 +35,10 @@ struct ChatArchive {
             try FileManager.default.moveItem(at: url, to: aside)
             throw ArchiveError(errorDescription: "The saved conversation couldn't be read, so it was moved to \(aside.path).")
         }
+    }
+
+    struct Unreadable: LocalizedError {
+        let errorDescription: String?
     }
 
     func save(_ items: [ChatItem], repo: String, number: UInt64) throws {

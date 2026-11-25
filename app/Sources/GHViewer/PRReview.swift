@@ -32,6 +32,8 @@ final class PRReview {
     /// Changed by the diff to show the chat and focus its composer (e.g. "Ask about these lines").
     var chatFocusRequest: UUID?
     private(set) var isSubmitting = false
+    /// Set when a saved chat exists but couldn't be read, so saving would overwrite it.
+    @ObservationIgnored private var isChatArchiveUnreadable = false
 
     @ObservationIgnored private unowned let store: ReviewStore
 
@@ -225,6 +227,7 @@ final class PRReview {
         chat.clear()
         do {
             try store.chats.delete(repo: repo, number: number)
+            isChatArchiveUnreadable = false
         } catch {
             actionError = error.coreMessage
         }
@@ -238,6 +241,7 @@ final class PRReview {
     }
 
     private func saveChat() {
+        guard !isChatArchiveUnreadable else { return }
         do {
             try store.chats.save(chat.items, repo: repo, number: number)
         } catch {
@@ -254,6 +258,7 @@ final class PRReview {
             let date = saved.savedAt.formatted(date: .abbreviated, time: .shortened)
             chat.append(.info("Conversation from \(date). \(chat.agent.displayName) starts a new session from here and doesn't remember it."))
         } catch {
+            isChatArchiveUnreadable = error is ChatArchive.Unreadable
             chat.append(.notice(error.coreMessage))
         }
     }
