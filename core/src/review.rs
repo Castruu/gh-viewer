@@ -51,6 +51,11 @@ pub struct ReviewHub {
     sessions: Sessions,
     /// Held while a PR's review is submitted, so two submits can't both start one.
     submits: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>,
+    /// PRs whose worktree may be on another commit than their published review,
+    /// after a failed `open`. Agents are refused there until an `open` succeeds.
+    needs_reload: Mutex<HashSet<Key>>,
+    /// Tells the app about sessions closed for `needs_reload`.
+    listener: Arc<SessionCleanup>,
 }
 
 struct SessionInfo {
@@ -83,61 +88,37 @@ impl ReviewHub {
             github,
             checkouts: CheckoutManager::new(root),
             drafts,
-            agents: AgentHub::new(listener),
+            agents: AgentHub::new(listener.clone()),
             mcp,
             reviews: Mutex::new(HashMap::new()),
             sessions,
             submits: Mutex::default(),
+            needs_reload: Mutex::default(),
+            listener,
         }
     }
 
     /// Fetches the PR, checks it out and diffs it. While the PR has drafts, the
     /// checkout stays on the commit they were written against.
     pub async fn open(&self, repo: String, number: u64) -> Result<OpenedReview, CoreError> {
-        let mut detail = self.github.fetch_pull_request(repo.clone(), number).await?;
-        let mut pin = self.drafts.pinned_commit(repo.clone(), number)?;
-        // A draft made meanwhile, e.g. by an agent on the diff still shown, pins the
-        // PR to that commit; then it's loaded once more on that commit.
-        for _ in 0..2 {
-            let checkout = self
-                .checkouts
-                .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin.clone())
-                .await?;
-            // A push between the two reads leaves thread positions on another commit.
-            // If it persists, the diff lists threads by file instead of inline.
-            if detail.head_oid != checkout.latest_head_oid {
-                detail = self.github.fetch_pull_request(repo.clone(), number).await?;
+        let key = (repo.clone(), number);
+        let mut prepared = false;
+        let opened = self.load(repo, number, &mut prepared).await;
+        match &opened {
+            Ok(_) => {
+                self.needs_reload.lock().unwrap().remove(&key);
             }
-            let files = self.checkouts.diff(checkout.clone()).await?;
-            let review = OpenedReview { detail: detail.clone(), checkout, files };
-
-            let mut reviews = self.reviews.lock().unwrap();
-            let shared = reviews.get(&(repo.clone(), number)).cloned();
-            // Agents add drafts under this lock's read side, so the pin read here
-            // stays true until the review is published.
-            let published = shared.as_ref().map(|shared| shared.write().unwrap());
-            let pinned = self.drafts.pinned_commit(repo.clone(), number)?;
-            if pinned != pin {
-                pin = pinned;
-                continue;
-            }
-            match published {
-                Some(mut published) => *published = review.clone(),
-                None => {
-                    reviews.insert((repo, number), Arc::new(RwLock::new(review.clone())));
-                }
-            }
-            return Ok(review);
+            // The worktree may have moved while the published review didn't.
+            Err(_) if prepared => self.refuse_agents_until_reload(&key),
+            Err(_) => {}
         }
-        Err(CoreError::Git(format!(
-            "Drafts on {repo}#{number} kept changing which commit it's pinned to while it loaded. Try again."
-        )))
+        opened
     }
-
     /// Starts an agent session in the PR's worktree, with the app's MCP tools
     /// for that PR. The PR must have been opened first.
     pub async fn start_agent(&self, kind: AgentKind, repo: String, number: u64) -> Result<String, CoreError> {
         let key = (repo, number);
+        self.check_reloaded(&key)?;
         let review = self.review(&key)?;
         let mcp = self.mcp.get_or_try_init(McpServer::start).await?;
         let turn_head = TurnHead::default();
@@ -191,6 +172,7 @@ impl ReviewHub {
                 .ok_or_else(|| CoreError::Agent("This agent session has ended. Start a new one.".into()))?;
             (info.key.clone(), info.primed, info.turn_head.clone())
         };
+        self.check_reloaded(&key)?;
         let text = {
             let review = self.review(&key)?;
             let review = review.read().unwrap();
@@ -275,6 +257,76 @@ impl ReviewHub {
 }
 
 impl ReviewHub {
+    /// `open`'s work. Sets `prepared` before it first touches the worktree.
+    async fn load(&self, repo: String, number: u64, prepared: &mut bool) -> Result<OpenedReview, CoreError> {
+        let mut detail = self.github.fetch_pull_request(repo.clone(), number).await?;
+        let mut pin = self.drafts.pinned_commit(repo.clone(), number)?;
+        // A draft made meanwhile, e.g. by an agent on the diff still shown, pins the
+        // PR to that commit; then it's loaded once more on that commit.
+        for _ in 0..2 {
+            *prepared = true;
+            let checkout = self
+                .checkouts
+                .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin.clone())
+                .await?;
+            // A push between the two reads leaves thread positions on another commit.
+            // If it persists, the diff lists threads by file instead of inline.
+            if detail.head_oid != checkout.latest_head_oid {
+                detail = self.github.fetch_pull_request(repo.clone(), number).await?;
+            }
+            let files = self.checkouts.diff(checkout.clone()).await?;
+            let review = OpenedReview { detail: detail.clone(), checkout, files };
+
+            let mut reviews = self.reviews.lock().unwrap();
+            let shared = reviews.get(&(repo.clone(), number)).cloned();
+            // Agents add drafts under this lock's read side, so the pin read here
+            // stays true until the review is published.
+            let published = shared.as_ref().map(|shared| shared.write().unwrap());
+            let pinned = self.drafts.pinned_commit(repo.clone(), number)?;
+            if pinned != pin {
+                pin = pinned;
+                continue;
+            }
+            match published {
+                Some(mut published) => *published = review.clone(),
+                None => {
+                    reviews.insert((repo, number), Arc::new(RwLock::new(review.clone())));
+                }
+            }
+            return Ok(review);
+        }
+        Err(CoreError::Git(format!(
+            "Drafts on {repo}#{number} kept changing which commit it's pinned to while it loaded. Try again."
+        )))
+    }
+
+    /// Refuses agents on `key` until it's opened again, and closes its sessions,
+    /// telling the app, so none drafts on code the review doesn't show.
+    fn refuse_agents_until_reload(&self, key: &Key) {
+        self.needs_reload.lock().unwrap().insert(key.clone());
+        let ids: Vec<String> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, info)| info.key == *key)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.close_agent(id.clone());
+            let message = "The PR couldn't be reloaded, so its agent session was closed. Reload the PR, then ask again.".to_string();
+            self.listener.on_event(id, AgentEvent::Disconnected { message });
+        }
+    }
+
+    /// Fails when a failed reload left `key` needing another.
+    fn check_reloaded(&self, key: &Key) -> Result<(), CoreError> {
+        if self.needs_reload.lock().unwrap().contains(key) {
+            return Err(CoreError::Agent("Reload the PR first: its last reload failed, so the agent could see other code than the diff.".into()));
+        }
+        Ok(())
+    }
+
     fn review(&self, key: &Key) -> Result<Arc<RwLock<OpenedReview>>, CoreError> {
         self.reviews
             .lock()
@@ -995,6 +1047,23 @@ mod tests {
         assert_eq!(stored[0].commit_oid, "b".repeat(40));
         assert_eq!(tools.review_threads(Some("other.rs".into())), serde_json::json!([]));
         assert_eq!(tools.pr_context()["files"][0]["additions"], 2);
+    }
+
+    #[tokio::test]
+    async fn refuses_agents_after_a_failed_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let drafts = Arc::new(DraftStore::new(root.clone()));
+        let hub = ReviewHub::new(root, Arc::new(GitHubClient::new()), drafts, Arc::new(Recorder::default()));
+        let key = ("o/r".to_string(), 7);
+        hub.reviews.lock().unwrap().insert(key.clone(), Arc::new(RwLock::new(review())));
+
+        hub.refuse_agents_until_reload(&key);
+        let error = hub.start_agent(AgentKind::Codex, "o/r".into(), 7).await.unwrap_err();
+        assert!(error.to_string().contains("Reload the PR first"), "{error}");
+        // A successful open clears it; here, as open does.
+        hub.needs_reload.lock().unwrap().remove(&key);
+        assert!(hub.check_reloaded(&key).is_ok());
     }
 
     #[test]
