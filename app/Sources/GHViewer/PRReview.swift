@@ -93,7 +93,7 @@ final class PRReview {
 
     /// Updates GitHub's "Viewed" checkbox, showing the change right away and undoing it if GitHub refuses.
     func setViewed(_ path: String, _ viewed: Bool) async {
-        guard let id = opened?.detail.id else { return }
+        guard canMarkViewed, let id = opened?.detail.id else { return }
         let previous = opened?.detail.files.first { $0.path == path }?.viewed
         updateViewed(path, viewed ? .viewed : .unviewed)
         do {

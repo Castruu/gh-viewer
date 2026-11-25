@@ -42,7 +42,7 @@ struct DiffList: View {
                             }
                         } header: {
                             DiffFileHeader(file: file, isExpanded: isExpanded, isViewed: viewed.contains(file.id),
-                                           canMarkViewed: !review.hasNewerCommits,
+                                           canMarkViewed: review.canMarkViewed,
                                            notes: notes.isEmpty ? nil : notes.summary,
                                            isShowingNotes: shownNotes.contains(file.id)) {
                                 expanded[file.id] = !isExpanded
@@ -292,7 +292,7 @@ struct DiffFileHeader: View {
                 .toggleStyle(.checkbox)
                 .font(.callout)
                 .disabled(!canMarkViewed)
-                .help(canMarkViewed ? "Mark as viewed on GitHub. Viewed files stay collapsed" : PRReview.viewedPinnedHelp)
+                .help(canMarkViewed ? "Mark as viewed on GitHub. Viewed files stay collapsed" : PRReview.viewedUnavailableHelp)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

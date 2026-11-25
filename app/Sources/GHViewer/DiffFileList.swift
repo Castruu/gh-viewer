@@ -16,7 +16,7 @@ struct DiffFileList: View {
             if let path { select(path) }
         })) { file in
             DiffFileRow(file: file, draftCount: draftCounts[file.id] ?? 0, isViewed: viewed.contains(file.id),
-                        canMarkViewed: !review.hasNewerCommits) {
+                        canMarkViewed: review.canMarkViewed) {
                 setViewed(file.id, $0)
             }
         }
@@ -58,7 +58,7 @@ private struct DiffFileRow: View {
                 .toggleStyle(.checkbox)
                 .labelsHidden()
                 .disabled(!canMarkViewed)
-                .help(!canMarkViewed ? PRReview.viewedPinnedHelp
+                .help(!canMarkViewed ? PRReview.viewedUnavailableHelp
                       : isViewed ? "Viewed on GitHub. Uncheck to mark as not viewed" : "Mark as viewed on GitHub")
         }
         .opacity(isViewed ? 0.6 : 1)
