@@ -196,6 +196,7 @@ final class PRReview {
         do {
             let sessionId = try await session(for: kind)
             chat.runningSession = sessionId
+            store.usedAgent(on: self)
             if isCancelPending {
                 chat.append(.stopped)
                 return
@@ -245,6 +246,16 @@ final class PRReview {
         } catch {
             actionError = error.coreMessage
         }
+    }
+
+    /// Closes this PR's agent sessions to free their processes, e.g. when other
+    /// PRs used agents since. The transcript stays; the next question starts afresh.
+    func closeAgentSessions() {
+        guard !chat.isRunning, !chat.sessions.isEmpty else { return }
+        chat.sessions.values.forEach { store.hub.closeAgent(sessionId: $0) }
+        chat.sessions = [:]
+        chat.append(.info("This chat's agent session was closed to save memory. The next question starts a new one, which doesn't remember the answers above."))
+        saveChat()
     }
 
     /// Saves a turn that's still streaming; finished turns were saved when they ended.

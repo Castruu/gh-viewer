@@ -29,6 +29,19 @@ final class ReviewStore {
         }
     }
 
+    /// PRs whose agent sessions stay open. Each Claude session is a CLI process.
+    static let maxPRsWithAgents = 5
+    private var agentPRs = RecentlyUsed()
+
+    /// Called when `review` uses an agent. Closes the sessions of the least
+    /// recently used PRs beyond `maxPRsWithAgents`, unless a turn runs there.
+    func usedAgent(on review: PRReview) {
+        let evicted = agentPRs.use(review.url, limit: Self.maxPRsWithAgents) { url in
+            reviews[url]?.chat.isRunning != true
+        }
+        evicted.forEach { reviews[$0]?.closeAgentSessions() }
+    }
+
     /// The review for a PR, created on first use. Keyed by URL like the sidebar.
     func review(for pullRequest: PullRequest) -> PRReview {
         if let review = reviews[pullRequest.url] {
@@ -53,6 +66,24 @@ final class ReviewStore {
     /// ~/Library/Application Support/GHViewer: clones, worktrees, drafts and chats.
     private static func dataDirectory() -> URL {
         URL.applicationSupportDirectory.appending(path: "GHViewer", directoryHint: .isDirectory)
+    }
+}
+
+/// Keys in order of use, least recent first.
+struct RecentlyUsed {
+    private(set) var keys: [String] = []
+
+    /// Moves `key` to the end. Then drops keys from the front while there are
+    /// more than `limit`, skipping those `canDrop` refuses, and returns them.
+    mutating func use(_ key: String, limit: Int, canDrop: (String) -> Bool) -> [String] {
+        keys.removeAll { $0 == key }
+        keys.append(key)
+        var dropped: [String] = []
+        for old in keys.dropLast() where keys.count - dropped.count > limit && canDrop(old) {
+            dropped.append(old)
+        }
+        keys.removeAll { dropped.contains($0) }
+        return dropped
     }
 }
 
