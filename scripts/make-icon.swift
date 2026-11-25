@@ -1,7 +1,6 @@
 // Renders docs/assets/icon.svg to app/AppIcon.icns, adding the film grain an SVG can't hold.
 // Usage, from the repo root: swift scripts/make-icon.swift [icon.svg] [AppIcon.icns]
-// The icons to pick from in Settings: render docs/assets/icons/<name>.svg to an .icns the same way,
-// then `sips -s format png -Z 256 <name>.icns --out app/Icons/icon-<name>.png`.
+// The icons to pick from in Settings: swift scripts/make-icon.swift docs/assets/icons/<name>.svg app/Icons/icon-<name>.png
 import AppKit
 
 let arguments = CommandLine.arguments
@@ -40,6 +39,12 @@ for y in 0..<1024 {
 
 let image = NSImage(size: NSSize(width: 1024, height: 1024))
 image.addRepresentation(master)
+// A .png output is one of the icons to pick from in Settings: a single 256px image.
+if output.hasSuffix(".png") {
+    try! bitmap(256) { image.draw(in: $0) }.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: output))
+    print("Wrote \(output)")
+    exit(0)
+}
 let iconset = FileManager.default.temporaryDirectory.appendingPathComponent("AppIcon.iconset")
 try? FileManager.default.removeItem(at: iconset)
 try! FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)

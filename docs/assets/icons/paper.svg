@@ -96,10 +96,9 @@
     <rect x="920" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
     <rect x="935" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
   </g>
-  <rect x="103" y="103" width="818" height="818" rx="182" fill="none" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="6"/>
 
   <!-- a pull request, in ink -->
   <g fill="none" stroke="#1B1A18" stroke-width="50" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M372 408V616M652 616C652 470 610 352 500 352M552 298L496 352L552 406"/><circle cx="372" cy="352" r="56"/><circle cx="372" cy="672" r="56"/><circle cx="652" cy="672" r="56"/>
+    <path d="M372 408V616M652 616V470Q652 352 556 352H506M558 300L506 352L558 404"/><circle cx="372" cy="352" r="56"/><circle cx="372" cy="672" r="56"/><circle cx="652" cy="672" r="56"/>
   </g>
 </svg>
