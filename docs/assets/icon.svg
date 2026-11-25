@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4C4FC4"/>
+      <stop offset="1" stop-color="#1B1C4A"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E9EDF3"/>
+    </linearGradient>
+    <clipPath id="lens"><circle cx="640" cy="501" r="132"/></clipPath>
+  </defs>
+
+  <!-- macOS icon grid: 824pt body centred on a 1024pt canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+
+  <!-- the diff -->
+  <rect x="214" y="240" width="476" height="544" rx="48" fill="url(#card)"/>
+  <rect x="262" y="306" width="250" height="34" rx="17" fill="#C3CBD8"/>
+  <rect x="214" y="378" width="476" height="70" fill="#FCE1DF"/>
+  <rect x="262" y="396" width="300" height="34" rx="17" fill="#E5534B"/>
+  <rect x="214" y="466" width="476" height="70" fill="#DCF3E3"/>
+  <rect x="262" y="484" width="330" height="34" rx="17" fill="#2DA44E"/>
+  <rect x="262" y="574" width="210" height="34" rx="17" fill="#C3CBD8"/>
+  <rect x="262" y="662" width="280" height="34" rx="17" fill="#C3CBD8"/>
+
+  <!-- the lens, magnifying the added line -->
+  <line x1="748" y1="608" x2="836" y2="696" stroke="#FFFFFF" stroke-width="64" stroke-linecap="round"/>
+  <circle cx="640" cy="501" r="132" fill="#ECF8F0"/>
+  <g clip-path="url(#lens)">
+    <rect x="500" y="451" width="280" height="100" fill="#C6EDD3"/>
+    <rect x="626" y="481" width="200" height="40" rx="20" fill="#2DA44E"/>
+  </g>
+  <path d="M548 501h50M573 476v50" stroke="#2DA44E" stroke-width="20" stroke-linecap="round"/>
+  <circle cx="640" cy="501" r="132" fill="none" stroke="#FFFFFF" stroke-width="40"/>
+
+  <!-- the agent -->
+  <path d="M800 190 C809 240 825 256 875 265 C825 274 809 290 800 340 C791 290 775 274 725 265 C775 256 791 240 800 190 Z" fill="#FFD25E"/>
+</svg>
