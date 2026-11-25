@@ -53,5 +53,10 @@ struct HighlightTests {
         #expect(new.news(since: old).map(\.title) == ["Review requested again", "Review requested", "Checks failing"])
         #expect(new.news(since: old).map(\.url) == ["u3", "u4", "u1"])
         #expect(new.news(since: new).isEmpty)
+        // A re-run that fails again is news again; staying failed isn't.
+        let rerunning = dashboard(authored: [pr(1, checks: .pending)])
+        let failedAgain = dashboard(authored: [pr(1, checks: .failure)])
+        #expect(failedAgain.news(since: rerunning).map(\.title) == ["Checks failing"])
+        #expect(failedAgain.news(since: failedAgain).isEmpty)
     }
 }

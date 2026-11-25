@@ -125,7 +125,7 @@ to pick from for the Dock.
 
 <img src="docs/assets/screenshots/drafts.png" alt="A draft review comment written by the agent, shown inline in the diff">
 
-<img src="docs/assets/screenshots/submit.png" width="420" align="right" alt="The Submit Review sheet, listing the draft Claude wrote">
+<img src="docs/assets/screenshots/submit.png" width="420" align="right" alt="The Submit Review sheet, listing a draft comment">
 
 - Select lines to draft a comment yourself, or let the agent draft them. The agent
   writes replacement code as a GitHub suggestion the author can apply in one click.

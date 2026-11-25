@@ -22,6 +22,8 @@ extension Dashboard {
         let checks = Dictionary(old.authored.map { ($0.url, $0.checkState) }) { first, _ in first }
         for pullRequest in authored where pullRequest.checkState == .failure {
             // Only a PR that was there before and wasn't failing: a new failing PR is one you just opened.
+            // It doesn't repeat while the checks stay failing, and it does tell you again when a
+            // re-run or a new push fails after the checks had been running or passing.
             if let before = checks[pullRequest.url], before != .failure {
                 news.append(QueueNews(title: "Checks failing",
                                       body: "\(pullRequest.repo) #\(pullRequest.number): \(pullRequest.title)",
