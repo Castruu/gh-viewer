@@ -277,7 +277,18 @@ impl CheckoutManager {
             }
         }
         // On every prepare, so worktrees made before this lose them too.
-        hide_agent_config(wt).await.map_err(checkout_error())?;
+        if let Err(error) = hide_agent_config(wt).await {
+            let version = git(&["--version"]).await.unwrap_or_default();
+            return Err(match too_old_for_sparse(&version) {
+                Some(version) => CoreError::Git(format!(
+                    "GH Viewer needs git {}.{} or newer to keep a PR's agent config out of its checkout (`git sparse-checkout set --no-cone`), but {} is version {version}. Update it, e.g. with `brew upgrade git`, then try again.",
+                    SPARSE_MIN_GIT.0,
+                    SPARSE_MIN_GIT.1,
+                    git_path()
+                )),
+                None => checkout_error()(error),
+            });
+        }
 
         Ok(Checkout {
             repo,
@@ -386,6 +397,19 @@ pub(crate) async fn hide_agent_config(wt: &str) -> Result<String, String> {
         "/*", "!/.claude", "!/.codex", "!/.mcp.json",
     ])
     .await
+}
+
+/// The first git whose `sparse-checkout set` takes `--no-cone`.
+const SPARSE_MIN_GIT: (u32, u32) = (2, 35);
+
+/// The version in `git --version` output, if it's older than [`SPARSE_MIN_GIT`].
+fn too_old_for_sparse(output: &str) -> Option<String> {
+    let version = output.trim().strip_prefix("git version ")?.split(' ').next()?;
+    let mut parts = version.split('.').map(|part| part.parse::<u32>().ok());
+    let (Some(major), Some(minor)) = (parts.next()?, parts.next()?) else {
+        return None;
+    };
+    ((major, minor) < SPARSE_MIN_GIT).then(|| version.to_owned())
 }
 
 /// What agents read as config from the root of their cwd.
@@ -1125,6 +1149,15 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
                 assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
             }
         }
+    }
+
+    #[test]
+    fn names_a_git_too_old_for_sparse_checkout() {
+        assert_eq!(too_old_for_sparse("git version 2.34.1\n").as_deref(), Some("2.34.1"));
+        assert_eq!(too_old_for_sparse("git version 1.9.5"), Some("1.9.5".into()));
+        assert_eq!(too_old_for_sparse("git version 2.35.0"), None);
+        assert_eq!(too_old_for_sparse("git version 2.50.1 (Apple Git-155)"), None);
+        assert_eq!(too_old_for_sparse(""), None);
     }
 
     #[test]
