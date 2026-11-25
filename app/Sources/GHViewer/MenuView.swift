@@ -65,17 +65,21 @@ private struct PRSection: View {
     let title: String
     let pullRequests: [PullRequest]
     let emptyText: String
+    /// The menu is a glance; the window has the whole list.
+    private static let limit = 5
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        HStack {
+        HStack(spacing: 6) {
             Text(title)
             Text("\(pullRequests.count)")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
         }
-        .font(.headline)
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(.secondary)
         .padding(.horizontal, 16)
         .padding(.top, 10)
-        .padding(.bottom, 4)
+        .padding(.bottom, 2)
 
         if pullRequests.isEmpty {
             Text(emptyText)
@@ -83,8 +87,18 @@ private struct PRSection: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
         } else {
-            ForEach(pullRequests, id: \.url) { pullRequest in
+            ForEach(pullRequests.prefix(Self.limit), id: \.url) { pullRequest in
                 PRRow(model: model, pullRequest: pullRequest)
+            }
+            if pullRequests.count > Self.limit {
+                Button("\(pullRequests.count - Self.limit) more in GH Viewer") {
+                    openWindow.reviewWindow()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .help("Open the review window for the whole list")
             }
         }
     }
@@ -101,25 +115,7 @@ private struct PRRow: View {
             model.selectedPullRequestURL = pullRequest.url
             openWindow.reviewWindow()
         } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                ReviewIcon(decision: pullRequest.reviewDecision)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pullRequest.title)
-                        .lineLimit(2)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 4)
-
-                if pullRequest.isDraft {
-                    DraftBadge()
-                }
-                CheckIcon(state: pullRequest.checkState)
-            }
+            PRRowLabel(pullRequest: pullRequest)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .contentShape(Rectangle())
@@ -138,15 +134,6 @@ private struct PRRow: View {
             }
         }
     }
-
-    private var subtitle: String {
-        var parts = ["\(pullRequest.repo) #\(pullRequest.number)"]
-        if let author = pullRequest.author {
-            parts.append(author)
-        }
-        parts.append(relativeTime(pullRequest.updatedAt, now: Date()))
-        return parts.joined(separator: " · ")
-    }
 }
 
 private struct FooterView: View {
@@ -161,7 +148,6 @@ private struct FooterView: View {
                 .buttonStyle(.borderless)
 
             Button("Open GH Viewer") {
-                model.selectedPullRequestURL = nil
                 openWindow.reviewWindow()
             }
             .buttonStyle(.borderless)

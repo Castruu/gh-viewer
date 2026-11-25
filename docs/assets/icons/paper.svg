@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="glass" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#F6F3EC"/>
+      <stop offset="1" stop-color="#CFCAC0"/>
+    </linearGradient>
+    <clipPath id="body"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+
+  <!-- macOS icon grid: 824pt body centred on a 1024pt canvas. Fluted glass over one gradient.
+       scripts/make-icon.swift adds the film grain, which an SVG can't hold, and writes app/AppIcon.icns. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glass)"/>
+  <g clip-path="url(#body)">
+    <rect x="100" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="115" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="120" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="135" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="140" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="155" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="160" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="175" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="180" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="195" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="200" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="215" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="220" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="235" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="240" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="255" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="260" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="275" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="280" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="295" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="300" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="315" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="320" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="335" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="340" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="355" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="360" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="375" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="380" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="395" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="400" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="415" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="420" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="435" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="440" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="455" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="460" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="475" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="480" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="495" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="500" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="515" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="520" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="535" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="540" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="555" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="560" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="575" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="580" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="595" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="600" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="615" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="620" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="635" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="640" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="655" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="660" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="675" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="680" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="695" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="700" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="715" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="720" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="735" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="740" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="755" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="760" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="775" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="780" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="795" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="800" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="815" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="820" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="835" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="840" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="855" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="860" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="875" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="880" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="895" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="900" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="915" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+    <rect x="920" y="100" width="7" height="824" fill="#FFFFFF" opacity="0.5"/>
+    <rect x="935" y="100" width="5" height="824" fill="#000000" opacity="0.08"/>
+  </g>
+  <rect x="103" y="103" width="818" height="818" rx="182" fill="none" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="6"/>
+
+  <!-- a pull request, in ink -->
+  <g fill="none" stroke="#1B1A18" stroke-width="50" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M372 408V616M652 616C652 470 610 352 500 352M552 298L496 352L552 406"/><circle cx="372" cy="352" r="56"/><circle cx="372" cy="672" r="56"/><circle cx="652" cy="672" r="56"/>
+  </g>
+</svg>

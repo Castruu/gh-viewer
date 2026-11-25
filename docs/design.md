@@ -12,8 +12,8 @@ edit and submit those.
 
 | # | Decision |
 |---|---|
-| 1 | Main window with three panes: a sidebar of PRs grouped by repo, the diff, and agent chat. The menu bar icon stays as the badge and entry point. The app is menu-bar-only until the window opens, gets a Dock icon while it's open, and drops it again on close. |
-| 1a | The sidebar adds open PRs you've already reviewed (`reviewed-by:@me`), because GitHub removes your review request once you review. Repo headers show how many PRs wait on you, and those repos sort first. |
+| 1 | Main window with three panes (the sidebar switches between the PR list and the open PR's file tree): a sidebar of PRs grouped by what they need from you (your review, your own, already reviewed), the diff, and agent chat. The menu bar icon stays as the badge and entry point. The app is menu-bar-only until the window opens, gets a Dock icon while it's open, and drops it again on close. |
+| 1a | The sidebar adds open PRs you've already reviewed (`reviewed-by:@me`), because GitHub removes your review request once you review. They get their own section, after the PRs that need your review and your own. |
 | 1b | Clicking a PR in the menu bar opens it in the review window. "Open in browser" moves to a context menu. |
 | 2 | The diff is computed locally from an app-managed checkout, not from GitHub's files API. |
 | 3 | Line-based unified diff only. No structural (difftastic-style) diff and no split view in v1. |
@@ -27,7 +27,7 @@ edit and submit those.
 | 6a | Agent sessions load only your own settings, never the PR's, so opening a PR can't run its hooks or MCP servers. Worktrees are sparse checkouts without `/.claude`, `/.codex` and `/.mcp.json`, whatever their type, and those are also removed before each session starts. Claude sessions also get `settingSources: ["user"]`. The sparse checkout is needed because codex-acp trusts every session folder and claude-agent-acp reads the project's permission mode regardless. Those files still show in the diff, but agents can't read them from disk. |
 | 7 | We build the chat UI (streaming text, tool calls, permission prompts) and a diff view that stays fast on large PRs. |
 | 7b | Chat transcripts are saved per PR and shown again after a restart. The agent's session doesn't survive a restart, so a note marks where the new session starts. "Clear Chat" deletes a transcript. Markdown tables in replies are drawn as tables. |
-| 7a | Themes: Argus's four palettes (Cool by default, Soft, Focus, Vivid) set the accent colors: statuses, the waiting dot, repo names, diff tints, selection and agent drafts. Each palette has a dark variant (Argus's colors) and a light variant. A separate Appearance setting picks System, Light or Dark. Both are chosen from the palette button in the toolbar (click for the next palette, hold to choose) and remembered. |
+| 7a | Themes: Argus's four palettes (Cool by default, Soft, Focus, Vivid) set the accent colors: statuses, the waiting dot, repo names, diff tints, selection and agent drafts. Each palette has a dark variant (Argus's colors) and a light variant. A separate Appearance setting picks System, Light or Dark. Both are chosen in Settings (⌘,) and remembered. |
 | 8 | The app never shows a login and never touches agent credentials. The user signs in to `claude` or `codex` themselves, and API keys work through the environment. The name doesn't use "Claude Code"; plain text like "works with Claude Code and Codex" is fine. |
 
 ## Architecture

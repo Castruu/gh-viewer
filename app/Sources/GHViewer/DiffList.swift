@@ -40,6 +40,8 @@ struct DiffList: View {
                                 DiffNotice(text: "\(file.lineCount.formatted()) changed lines are hidden to keep scrolling fast.",
                                            buttonTitle: "Show Diff") { expanded[file.id] = true }
                             }
+                            // Air between one file and the next.
+                            Color.clear.frame(height: 14)
                         } header: {
                             DiffFileHeader(file: file, isExpanded: isExpanded, isViewed: viewed.contains(file.id),
                                            canMarkViewed: review.canMarkViewed,
@@ -55,6 +57,8 @@ struct DiffList: View {
                         }
                     }
                 }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
             }
             .onChange(of: scrollRequest) { _, request in
                 if let request { proxy.scrollTo(request.path, anchor: .top) }
@@ -151,6 +155,7 @@ struct DiffRowView: View, Equatable {
     let review: PRReview
     @Binding var editor: DiffEditorTarget?
     let select: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
         switch row.kind {
@@ -164,6 +169,19 @@ struct DiffRowView: View, Equatable {
                     .accessibilityElement(children: .combine)
                     .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
                     .accessibilityAction { select() }
+                    // GitHub's "+": shows that a line can be clicked before you've tried.
+                    // The click goes through to the line, which brings up Comment and Ask Agent.
+                    .overlay(alignment: .leading) {
+                        if isHovering && !isSelected {
+                            Image(systemName: "plus.square.fill")
+                                // Small enough for the gutter's left margin, so it never covers a line number.
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tint)
+                                .padding(.leading, 1)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .onHover { isHovering = $0 }
                     .overlay(alignment: .trailing) {
                         if let actionSelection {
                             DiffSelectionBar(review: review, canComment: canComment, crossesHunks: crossesHunks) {
@@ -238,7 +256,7 @@ struct DiffHunkRow: View {
     var body: some View {
         Text(verbatim: header)
             .font(DiffStyle.font)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.tertiary)
             .lineLimit(1)
             .padding(.leading, numberWidth * 2 + 8)
             .padding(.vertical, 4)
@@ -299,9 +317,11 @@ struct DiffFileHeader: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.06),
+                    in: .rect(topLeadingRadius: 8, bottomLeadingRadius: isExpanded ? 0 : 8,
+                              bottomTrailingRadius: isExpanded ? 0 : 8, topTrailingRadius: 8))
+        // Opaque behind the rounded card, so lines scrolling under a pinned header don't show at its corners.
         .background(Color(nsColor: .windowBackgroundColor))
-        .overlay(alignment: .bottom) { Divider() }
-        .overlay(alignment: .top) { Divider() }
     }
 }
 

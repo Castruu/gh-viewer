@@ -3,18 +3,15 @@ import SwiftUI
 /// The selected PR's changed files and diff, with drafts, threads and review submission.
 struct DiffPane: View {
     let review: PRReview
+    /// Called with the review's URL once a submit went through.
+    let submitted: (String) -> Void
     /// The diff flattened for the lazy list; rebuilt only when the diff itself changes.
     @State private var files: [DiffFileModel] = []
     /// Collapse choices by path. Files without one follow their default: collapsed when viewed or large.
     @State private var expanded: [String: Bool] = [:]
     @State private var editor: DiffEditorTarget?
-    @State private var scrollRequest: DiffScrollRequest?
     @State private var isSubmitPresented = false
     @State private var isConfirmingDiscard = false
-    /// The last submitted review's URL, shown briefly as a confirmation.
-    @State private var submittedURL: String?
-    /// HSplitView can't set a starting width, so the split is drawn here; it's kept across PRs.
-    @AppStorage("diffFileListWidth") private var fileListWidth = 260.0
     @Environment(\.palette) private var palette
 
     var body: some View {
@@ -47,7 +44,7 @@ struct DiffPane: View {
             }
         }
         .sheet(isPresented: $isSubmitPresented) {
-            SubmitReviewSheet(review: review) { submittedURL = $0 }
+            SubmitReviewSheet(review: review, submitted: submitted)
         }
     }
 
@@ -55,9 +52,6 @@ struct DiffPane: View {
         VStack(spacing: 0) {
             banners
             HStack(spacing: 0) {
-                DiffFileList(review: review, files: files) { scrollRequest = DiffScrollRequest(path: $0) } setViewed: { setViewed($0, $1) }
-                    .frame(width: fileListWidth)
-                DiffSplitDivider(width: $fileListWidth, range: 180...480)
                 VStack(spacing: 0) {
                     DiffSummaryBar(review: review, files: files, isSubmitPresented: $isSubmitPresented)
                     Divider()
@@ -67,19 +61,10 @@ struct DiffPane: View {
                             .frame(maxHeight: .infinity)
                     } else {
                         DiffList(review: review, files: files, expanded: $expanded, editor: $editor,
-                                 scrollRequest: scrollRequest) { setViewed($0, $1) }
+                                 scrollRequest: review.scrollRequest) { setViewed($0, $1) }
                     }
                 }
                 .frame(minWidth: 360, maxWidth: .infinity)
-                .overlay(alignment: .bottom) {
-                    if let submittedURL {
-                        SubmitConfirmation(url: submittedURL) { self.submittedURL = nil }
-                            .task(id: submittedURL) {
-                                try? await Task.sleep(for: .seconds(8))
-                                self.submittedURL = nil
-                            }
-                    }
-                }
             }
         }
     }
@@ -145,33 +130,6 @@ struct DiffPane: View {
     }
 }
 
-/// A drag handle that resizes the view to its left.
-private struct DiffSplitDivider: View {
-    @Binding var width: Double
-    let range: ClosedRange<Double>
-    @State private var startWidth: Double?
-
-    var body: some View {
-        Divider()
-            .overlay {
-                Color.clear
-                    .frame(width: 9)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
-                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                        .onChanged { drag in
-                            let start = startWidth ?? width
-                            startWidth = start
-                            width = min(max(start + drag.translation.width, range.lowerBound), range.upperBound)
-                        }
-                        .onEnded { _ in startWidth = nil })
-            }
-            .help("Drag to resize the file list")
-    }
-}
-
 /// Above the diff: totals, Reload, and Submit Review with the draft count.
 private struct DiffSummaryBar: View {
     let review: PRReview
@@ -194,8 +152,10 @@ private struct DiffSummaryBar: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Label("Reload", systemImage: "arrow.clockwise")
+                        .labelStyle(.iconOnly)
                 }
             }
+            .buttonStyle(.borderless)
             .disabled(review.loadState == .loading)
             .help("Fetch the PR again to pick up new pushes and comments")
             Button {
@@ -209,8 +169,8 @@ private struct DiffSummaryBar: View {
         }
         .font(.callout)
         .controlSize(.small)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
     }
 }
 
@@ -239,7 +199,7 @@ private struct DiffBanner<Actions: View>: View {
 }
 
 /// "Review submitted", with a link to it on GitHub.
-private struct SubmitConfirmation: View {
+struct SubmitConfirmation: View {
     let url: String
     let dismiss: () -> Void
     @Environment(\.palette) private var palette

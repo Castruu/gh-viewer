@@ -189,16 +189,76 @@ struct DiffScrollRequest: Equatable {
     let id = UUID()
 }
 
+/// A row of the file tree: a folder, or a changed file in it.
+enum FileTreeRow: Equatable, Identifiable {
+    case folder(path: String, name: String, depth: Int)
+    case file(path: String, depth: Int)
+
+    var id: String {
+        switch self {
+        case .folder(let path, _, _): "folder:" + path
+        case .file(let path, _): path
+        }
+    }
+
+    var path: String {
+        switch self {
+        case .folder(let path, _, _), .file(let path, _): path
+        }
+    }
+}
+
+/// The changed paths as a tree, flattened for a list. Folders come before files, and a chain of
+/// folders with nothing else in them is one row ("app/models"), as on GitHub.
+func fileTree(of paths: [String]) -> [FileTreeRow] {
+    final class Folder {
+        // Arrays searched linearly, to keep the diff's order; a dictionary if a PR ever has thousands of folders.
+        var folders: [(name: String, folder: Folder)] = []
+        var files: [String] = []
+    }
+    let root = Folder()
+    for path in paths {
+        var folder = root
+        for name in path.split(separator: "/").dropLast().map(String.init) {
+            if let existing = folder.folders.first(where: { $0.name == name }) {
+                folder = existing.folder
+            } else {
+                let new = Folder()
+                folder.folders.append((name, new))
+                folder = new
+            }
+        }
+        folder.files.append(path)
+    }
+    var rows: [FileTreeRow] = []
+    func add(_ folder: Folder, prefix: String, depth: Int) {
+        for entry in folder.folders {
+            var name = entry.name
+            var child = entry.folder
+            while child.files.isEmpty, child.folders.count == 1 {
+                name += "/" + child.folders[0].name
+                child = child.folders[0].folder
+            }
+            let path = prefix + name + "/"
+            rows.append(.folder(path: path, name: name, depth: depth))
+            add(child, prefix: path, depth: depth + 1)
+        }
+        rows += folder.files.map { .file(path: $0, depth: depth) }
+    }
+    add(root, prefix: "", depth: 0)
+    return rows
+}
+
 /// Diff metrics and tints. Colors come from the palette's roles, at row-background strength.
 enum DiffStyle {
     static let font = Font.system(size: 12, design: .monospaced)
     static let digitWidth = ("0" as NSString)
         .size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]).width
-    static let rowOpacity = 0.14
-    static let gutterOpacity = 0.24
+    static let rowOpacity = 0.09
+    static let gutterOpacity = 0.15
     static let selectedOpacity = 0.26
     /// Hunk headers stay neutral, since every palette's hues belong to states.
-    static let hunk = Color.primary.opacity(0.05)
+    static let hunk = Color.primary.opacity(0.03)
 }
 
 extension String {

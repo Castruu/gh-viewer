@@ -16,84 +16,72 @@ func relativeTime(_ date: Date, now: Date) -> String {
     return relativeFormatter.localizedString(for: date, relativeTo: now)
 }
 
-struct ReviewIcon: View {
-    let decision: ReviewDecision?
+/// A PR's state as a colored dot and a word. One thing only, the one most worth knowing:
+/// what's broken, then what's decided, then what's still running. Nothing for a PR with no news.
+struct PRStatusText: View {
+    let pullRequest: PullRequest
     @Environment(\.palette) private var palette
 
     var body: some View {
-        Image(systemName: symbol)
-            .foregroundStyle(color)
-            .frame(width: 16)
-            .help(label)
-    }
-
-    private var symbol: String {
-        switch decision {
-        case .approved: "checkmark.circle.fill"
-        case .changesRequested: "xmark.circle.fill"
-        case .reviewRequired: "clock"
-        case nil: "circle.dashed"
+        if let status {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(status.color)
+                    .frame(width: 6, height: 6)
+                Text(status.text)
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            .fixedSize()
         }
     }
 
-    private var color: Color {
-        switch decision {
-        case .approved: palette.pass
-        case .changesRequested: palette.fail
-        case .reviewRequired: palette.pending
-        case nil: .secondary
-        }
-    }
-
-    private var label: String {
-        switch decision {
-        case .approved: "Approved"
-        case .changesRequested: "Changes requested"
-        case .reviewRequired: "Review required"
-        case nil: "No review decision"
-        }
+    private var status: (text: String, color: Color)? {
+        if pullRequest.checkState == .failure { return ("Checks failing", palette.fail) }
+        if pullRequest.reviewDecision == .changesRequested { return ("Changes requested", palette.fail) }
+        if pullRequest.isDraft { return ("Draft", .secondary) }
+        if pullRequest.reviewDecision == .approved { return ("Approved", palette.pass) }
+        if pullRequest.checkState == .pending { return ("Checks running", palette.pending) }
+        return nil
     }
 }
 
-struct CheckIcon: View {
-    let state: CheckState?
-    @Environment(\.palette) private var palette
+/// A PR in a list: what it does, then where it is, how old, and its state.
+/// Who wrote it and the full title are in the tooltip and in the PR's header.
+struct PRRowLabel: View {
+    let pullRequest: PullRequest
 
     var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 8, height: 8)
-            .opacity(state == nil ? 0 : 1)
-            .help(label)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(pullRequest.title.withoutCommitPrefix)
+                .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(subtitle)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                PRStatusText(pullRequest: pullRequest)
+            }
+            .font(.caption)
+        }
+        .help("\(pullRequest.repo) #\(pullRequest.number) by \(pullRequest.author ?? "ghost"): \(pullRequest.title)")
     }
 
-    private var color: Color {
-        switch state {
-        case .success: palette.pass
-        case .failure: palette.fail
-        case .pending: palette.pending
-        case nil: .clear
-        }
-    }
-
-    private var label: String {
-        switch state {
-        case .success: "Checks passed"
-        case .failure: "Checks failed"
-        case .pending: "Checks running"
-        case nil: "No checks"
-        }
+    /// The repo without its owner: the short name is what tells PRs apart.
+    private var subtitle: String {
+        "\(pullRequest.repo.split(separator: "/").last ?? "") #\(pullRequest.number) · \(relativeTime(pullRequest.updatedAt, now: Date()))"
     }
 }
 
-struct DraftBadge: View {
-    var body: some View {
-        Text("Draft")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .overlay(Capsule().stroke(.secondary.opacity(0.6)))
+extension String {
+    /// "feat(skills): add a pr skill" as "Add a pr skill". A list reads faster when every
+    /// row starts with what the PR does.
+    var withoutCommitPrefix: String {
+        guard let prefix = range(of: #"^[a-z]+(\([^)]*\))?!?: "#, options: .regularExpression),
+              prefix.upperBound < endIndex
+        else { return self }
+        let rest = self[prefix.upperBound...]
+        return rest.prefix(1).uppercased() + rest.dropFirst()
     }
 }
 

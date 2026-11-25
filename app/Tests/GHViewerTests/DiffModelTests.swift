@@ -17,6 +17,16 @@ struct DiffModelTests {
         #expect(file.crossesHunks(1...4))
     }
 
+    @Test func fileTreePutsFoldersFirstAndJoinsChains() {
+        let rows = fileTree(of: ["README.md", "src/app/models/a.swift", "src/app/models/b.swift", "src/main.swift"])
+        #expect(rows == [.folder(path: "src/", name: "src", depth: 0),
+                         .folder(path: "src/app/models/", name: "app/models", depth: 1),
+                         .file(path: "src/app/models/a.swift", depth: 2),
+                         .file(path: "src/app/models/b.swift", depth: 2),
+                         .file(path: "src/main.swift", depth: 1),
+                         .file(path: "README.md", depth: 0)])
+    }
+
     @Test func threadsGoUnderALineOnlyOnTheirOwnCommit() {
         let thread = { (id: String, line: UInt32?, commit: String?) in
             ReviewThread(id: id, path: "a.swift", line: line, startLine: nil, side: .right, startSide: nil,
