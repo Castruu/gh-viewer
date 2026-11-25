@@ -50,7 +50,9 @@ fragment pendingReviews on PullRequest {
   reviews(states: PENDING, first: 10) {
     nodes {
       id viewerDidAuthor commit { oid }
-      comments(first: 100) { nodes { path line startLine body diffHunk } }
+      comments(first: 100) {
+        nodes { path line startLine originalLine originalStartLine body diffHunk }
+      }
     }
   }
 }
@@ -99,7 +101,7 @@ query($id: ID!, $after: String) {
       state url body commit { oid }
       comments(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { path line startLine body diffHunk }
+        nodes { path line startLine originalLine originalStartLine body diffHunk }
       }
     }
   }
@@ -147,6 +149,10 @@ pub struct PendingComment {
     /// `None` for a comment on the whole file.
     pub line: Option<u32>,
     pub start_line: Option<u32>,
+    /// The range on the commit its review was started on. Unlike `line`, it
+    /// doesn't move with later pushes, so drafts are matched on it.
+    pub original_line: Option<u32>,
+    pub original_start_line: Option<u32>,
     /// Inferred from the diff hunk, as GitHub doesn't report it for review
     /// comments: `Left` only when the commented line was removed.
     pub side: DiffSide,
@@ -372,19 +378,23 @@ impl GitHubClient {
                 }
                 (Recovery::Posted, Some(remote)) => {
                     // An earlier try went through as asked; only its answer was lost.
+                    let sent = present(&record.drafts, &remote.comments);
                     store
-                        .finish_attempt(repo, number, &submission.drafts)
+                        .finish_attempt(repo, number, &sent)
                         .map_err(|error| posted_but(&remote.url, error))?;
                     return Ok(remote.url);
                 }
                 (Recovery::PostedDifferently, Some(remote)) => {
-                    store.save_attempt(repo, number, None)?;
+                    // What GitHub posted mustn't stay sendable; the rest stays for a new review.
+                    let sent = present(&record.drafts, &remote.comments);
+                    store.finish_attempt(repo, number, &sent)?;
                     return Err(CoreError::Api(format!(
                         "an earlier submit was already posted as {} on commit {}: {}. This \
-                         submit wasn't sent, and your drafts are still here.",
+                         submit wasn't sent. {}",
                         posted_as(&remote.state),
                         short_oid(&remote.commit_oid),
-                        remote.url
+                        remote.url,
+                        stayed(&submission.drafts, &sent)
                     )));
                 }
             }
@@ -392,7 +402,7 @@ impl GitHubClient {
 
         let (review_id, pending_url) = match resume {
             Some((review_id, remote)) => {
-                let new = new_drafts(&submission.drafts, &remote.comments);
+                let new = missing(&submission.drafts, &remote.comments);
                 self.add_threads(&review_id, &new).await?;
                 (review_id, remote.url)
             }
@@ -445,7 +455,7 @@ impl GitHubClient {
                     "your pending review on github.com was just deleted. Try again.".into(),
                 )
             })?;
-            let new = new_drafts(&submission.drafts, &remote.comments);
+            let new = missing(&submission.drafts, &remote.comments);
             self.add_threads(&pending.id, &new).await?;
             return Ok((pending.id, remote.url));
         }
@@ -582,7 +592,7 @@ fn recover(
         && remote.body.trim() == submission.body.trim()
         && same_drafts
         // What GitHub posted decides, not the record.
-        && new_drafts(&submission.drafts, &remote.comments).is_empty();
+        && missing(&submission.drafts, &remote.comments).is_empty();
     if exact {
         Recovery::Posted
     } else {
@@ -608,6 +618,20 @@ fn posted_as(state: &str) -> &str {
         "COMMENTED" => "a comment",
         "DISMISSED" => "a review that has since been dismissed",
         other => other,
+    }
+}
+
+/// Which of `drafts` are still here after the ones GitHub posted were removed.
+fn stayed(drafts: &[DraftComment], sent: &[DraftComment]) -> String {
+    let left: Vec<String> = drafts
+        .iter()
+        .filter(|draft| !sent.contains(draft))
+        .map(|draft| format!("{}:{}", draft.path, draft.line))
+        .collect();
+    if left.is_empty() {
+        "Its drafts were all in it, so they're removed here.".into()
+    } else {
+        format!("Drafts not in it are still here: {}.", left.join(", "))
     }
 }
 
@@ -743,23 +767,58 @@ fn check_pending_commit(pending: &PendingReview, commit_oid: &str) -> Result<(),
     )))
 }
 
-/// Drafts not already in the pending review, so a retry doesn't post them twice.
-/// Side isn't compared: GitHub doesn't report it for review comments, and the
-/// inferred one can be wrong for comments on unchanged lines.
-fn new_drafts<'a>(drafts: &'a [DraftComment], pending: &[PendingComment]) -> Vec<&'a DraftComment> {
+/// Pairs each draft with a review comment that is it, one to one: two identical
+/// drafts need two comments. They match on path, original range (which later
+/// pushes don't move) and trimmed text, and on side where the comment's is
+/// known. Returns whether each draft found its comment.
+fn find_in(drafts: &[DraftComment], comments: &[PendingComment]) -> Vec<bool> {
     // A single-line range is sent without a start line, whichever way it was stored.
     let start = |start: Option<u32>, line: Option<u32>| start.filter(|&s| Some(s) != line);
+    let same = |draft: &DraftComment, comment: &PendingComment| {
+        comment.path == draft.path
+            && comment.original_line == Some(draft.line)
+            && start(comment.original_start_line, comment.original_line)
+                == start(draft.start_line, Some(draft.line))
+            && comment.body.trim() == draft.body.trim()
+            // Only a removed line's side is known; a right one may be a left context line.
+            && (comment.side == DiffSide::Right || draft.side == DiffSide::Left)
+    };
+    let mut used = vec![false; comments.len()];
+    let mut found = vec![false; drafts.len()];
+    // Known-left comments first, so a draft that could take either leaves them be.
+    for left in [true, false] {
+        for (draft, found) in drafts.iter().zip(&mut found) {
+            let free = |(i, comment): &(usize, &PendingComment)| {
+                !used[*i] && (comment.side == DiffSide::Left) == left && same(draft, comment)
+            };
+            if let (false, Some((i, _))) = (*found, comments.iter().enumerate().find(free)) {
+                used[i] = true;
+                *found = true;
+            }
+        }
+    }
+    found
+}
+
+/// Drafts the review doesn't have yet, so a retry doesn't post them twice.
+fn missing<'a>(drafts: &'a [DraftComment], comments: &[PendingComment]) -> Vec<&'a DraftComment> {
+    let found = find_in(drafts, comments);
     drafts
         .iter()
-        .filter(|draft| {
-            !pending.iter().any(|comment| {
-                comment.path == draft.path
-                    && comment.line == Some(draft.line)
-                    && start(comment.start_line, comment.line)
-                        == start(draft.start_line, Some(draft.line))
-                    && comment.body.trim() == draft.body.trim()
-            })
-        })
+        .zip(found)
+        .filter(|(_, found)| !found)
+        .map(|(draft, _)| draft)
+        .collect()
+}
+
+/// Drafts the review has.
+fn present(drafts: &[DraftComment], comments: &[PendingComment]) -> Vec<DraftComment> {
+    let found = find_in(drafts, comments);
+    drafts
+        .iter()
+        .zip(found)
+        .filter(|(_, found)| *found)
+        .map(|(draft, _)| draft.clone())
         .collect()
 }
 
@@ -959,6 +1018,8 @@ fn pending_comment(comment: PendingCommentNode) -> PendingComment {
         path: comment.path,
         line: comment.line,
         start_line: comment.start_line,
+        original_line: comment.original_line,
+        original_start_line: comment.original_start_line,
         side: if removed {
             DiffSide::Left
         } else {
@@ -1045,6 +1106,8 @@ struct PendingCommentNode {
     path: String,
     line: Option<u32>,
     start_line: Option<u32>,
+    original_line: Option<u32>,
+    original_start_line: Option<u32>,
     body: String,
     diff_hunk: String,
 }
@@ -1464,9 +1527,10 @@ mod tests {
           { "id": "PRR_mine", "viewerDidAuthor": true,
             "commit": { "oid": "6dcb09b5b57875f334f61aebed695e2e4193db5e" },
             "comments": { "nodes": [
-              { "path": "src/pr.rs", "line": 12, "startLine": 8, "body": "Split this up?",
+              { "path": "src/pr.rs", "line": 12, "startLine": 8, "originalLine": 12, "originalStartLine": 8,
+                "body": "Split this up?",
                 "diffHunk": "@@ -1,3 +1,12 @@\n fn a() {}\n+fn b() {}" },
-              { "path": "src/lib.rs", "line": 4, "startLine": null, "body": "Why remove this?",
+              { "path": "src/lib.rs", "line": 4, "startLine": null, "originalLine": 4, "body": "Why remove this?",
                 "diffHunk": "@@ -1,5 +1,4 @@\n use std::io;\n-use std::fs;" },
               { "path": "README.md", "line": null, "startLine": null, "body": "Whole file.", "diffHunk": "" }
             ] } }
@@ -1560,6 +1624,8 @@ mod tests {
             path: path.into(),
             line,
             start_line,
+            original_line: line,
+            original_start_line: start_line,
             side,
             body: body.into(),
         }
@@ -1835,6 +1901,35 @@ mod tests {
     }
 
     #[test]
+    fn a_different_posted_review_removes_only_the_drafts_it_has() {
+        let (mut record, mut remote, mut submission) = recovery_case("COMMENTED");
+        let mut other = draft("2", None);
+        other.line = 30;
+        record.drafts.push(other.clone());
+        submission.drafts.push(other.clone());
+        let mut late = draft("3", None);
+        late.line = 40;
+        submission.drafts.push(late.clone());
+        // Draft 2 was deleted from the review on github.com before it was submitted.
+        remote.comments.retain(|comment| comment.line == Some(12));
+        assert_eq!(
+            recover(&record, Some(&remote), &submission),
+            Recovery::PostedDifferently
+        );
+
+        let sent = present(&record.drafts, &remote.comments);
+        assert_eq!(sent, [record.drafts[0].clone()]);
+        assert_eq!(
+            stayed(&submission.drafts, &sent),
+            "Drafts not in it are still here: src/pr.rs:30, src/pr.rs:40."
+        );
+        assert_eq!(
+            stayed(&record.drafts[..1], &sent),
+            "Its drafts were all in it, so they're removed here."
+        );
+    }
+
+    #[test]
     fn reports_success_only_for_exactly_what_was_asked() {
         let differently = |change: &dyn Fn(&mut RemoteReview, &mut Submission)| {
             let (record, mut remote, mut submission) = recovery_case("APPROVED");
@@ -1945,7 +2040,10 @@ mod tests {
         assert!(may_be_pending(&Ok(Some(review.clone()))));
         assert!(may_be_pending(&Err(CoreError::Network("offline".into()))));
         assert!(!may_be_pending(&Ok(None)));
-        let submitted = RemoteReview { state: "APPROVED".into(), ..review };
+        let submitted = RemoteReview {
+            state: "APPROVED".into(),
+            ..review
+        };
         assert!(!may_be_pending(&Ok(Some(submitted))));
     }
 
@@ -2010,12 +2108,48 @@ mod tests {
                 "something else",
             ),
         ];
-        let ids: Vec<_> = new_drafts(&drafts, &pending)
+        let ids: Vec<_> = missing(&drafts, &pending)
             .iter()
             .map(|d| d.id.as_str())
             .collect();
         assert_eq!(ids, ["edited", "moved"]);
-        assert_eq!(new_drafts(&drafts, &[]).len(), 5);
+        assert_eq!(missing(&drafts, &[]).len(), 5);
+    }
+
+    #[test]
+    fn matches_drafts_to_comments_one_to_one() {
+        let twin = |id: &str| DraftComment {
+            body: "Same".into(),
+            ..draft(id, None)
+        };
+        let comment = pending("src/pr.rs", Some(12), None, DiffSide::Right, "Same");
+        // Two identical drafts need two comments.
+        let drafts = [twin("a"), twin("b")];
+        let one = std::slice::from_ref(&comment);
+        assert_eq!(present(&drafts, one), [twin("a")]);
+        assert_eq!(missing(&drafts, one), [&twin("b")]);
+        assert!(missing(&drafts, &[comment.clone(), comment.clone()]).is_empty());
+
+        // A push moved the comment's current line; its original one still matches.
+        let moved = PendingComment {
+            line: Some(20),
+            ..comment.clone()
+        };
+        assert_eq!(present(&drafts[..1], &[moved]), [twin("a")]);
+
+        // A comment known to be on a removed line isn't a right-side draft.
+        let left = PendingComment {
+            side: DiffSide::Left,
+            ..comment.clone()
+        };
+        assert!(present(&drafts[..1], std::slice::from_ref(&left)).is_empty());
+        // ...and a left draft takes it before a right comment it could also take.
+        let left_draft = DraftComment {
+            side: DiffSide::Left,
+            ..twin("l")
+        };
+        let both = [left_draft.clone(), twin("r")];
+        assert_eq!(present(&both, &[comment, left]), both);
     }
 
     #[test]

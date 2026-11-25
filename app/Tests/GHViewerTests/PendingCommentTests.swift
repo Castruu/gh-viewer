@@ -7,10 +7,13 @@ struct PendingCommentTests {
                                  body: "Nit", author: .you, commitOid: "abc")
         let comments = [
             // Put there by an earlier try.
-            PendingComment(path: "src/a.rs", line: 12, startLine: nil, side: .right, body: "Nit\n"),
+            PendingComment(path: "src/a.rs", line: 12, startLine: nil, originalLine: 12, originalStartLine: nil,
+                           side: .right, body: "Nit\n"),
             // Started on github.com.
-            PendingComment(path: "src/a.rs", line: 13, startLine: nil, side: .right, body: "Nit"),
-            PendingComment(path: "README.md", line: nil, startLine: nil, side: .right, body: "Whole file"),
+            PendingComment(path: "src/a.rs", line: 13, startLine: nil, originalLine: 13, originalStartLine: nil,
+                           side: .right, body: "Nit"),
+            PendingComment(path: "README.md", line: nil, startLine: nil, originalLine: nil, originalStartLine: nil,
+                           side: .right, body: "Whole file"),
         ]
         #expect(PRReview.startedOnGitHub(comments, drafts: [draft]) == 2)
         #expect(PRReview.startedOnGitHub(comments, drafts: []) == 3)
