@@ -103,6 +103,7 @@ private struct PRDetail: View {
         if let pullRequest = model.selectedPullRequest {
             VStack(spacing: 0) {
                 PRHeader(pullRequest: pullRequest, isInDashboard: model.isSelectionInDashboard)
+                PRDescription(markdown: reviews.review(for: pullRequest).opened?.detail.body ?? "")
                 Divider()
                 DiffPane(review: reviews.review(for: pullRequest)) { url in
                     submittedURL = url
@@ -110,6 +111,18 @@ private struct PRDetail: View {
                 }
                 // One diff view per PR, so scroll position and selection don't leak between PRs.
                 .id(pullRequest.url)
+            }
+            // Warms the next PR waiting on you, so moving on after a submit doesn't wait on a fetch.
+            // After a pause, so clicking through the list doesn't fetch every PR on the way.
+            .task(id: pullRequest.url) {
+                try? await Task.sleep(for: .seconds(3))
+                let waiting = model.dashboard?.reviewRequested ?? []
+                guard !Task.isCancelled, !ProcessInfo.processInfo.isLowPowerModeEnabled,
+                      let url = AppModel.next(after: pullRequest.url, in: waiting.map(\.url)),
+                      let next = waiting.first(where: { $0.url == url })
+                else { return }
+                let review = reviews.review(for: next)
+                if review.loadState == .idle { await review.load() }
             }
             .overlay(alignment: .bottom) {
                 if let submittedURL {
@@ -124,6 +137,49 @@ private struct PRDetail: View {
             ContentUnavailableView("No Pull Request Selected", systemImage: "arrow.triangle.pull",
                                    description: Text("Select a pull request in the sidebar."))
         }
+    }
+}
+
+/// What the author wrote about the PR. One line until you open it; the choice is remembered.
+private struct PRDescription: View {
+    let markdown: String
+    @AppStorage("showsDescription") private var isExpanded = false
+
+    var body: some View {
+        let text = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                ScrollView {
+                    ChatMarkdown(markdown: text)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: 820, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 6)
+                }
+                // As tall as a short description, and scrolling for a long one.
+                .frame(maxHeight: 220)
+                .fixedSize(horizontal: false, vertical: true)
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Description")
+                    if !isExpanded {
+                        Text(Self.preview(of: text))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .font(.callout)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 10)
+        }
+    }
+
+    /// The first line that says something, without markdown's heading marks.
+    static func preview(of text: String) -> String {
+        text.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# \t")) }
+            .first { !$0.isEmpty } ?? ""
     }
 }
 

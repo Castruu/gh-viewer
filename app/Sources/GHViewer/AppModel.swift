@@ -8,6 +8,8 @@ final class AppModel {
     static let refreshInterval: Duration = .seconds(120)
     /// Retry sooner after a failure, e.g. when the Mac wakes before Wi-Fi is back.
     static let retryInterval: Duration = .seconds(15)
+    /// In Low Power Mode the queue can wait: the menu still refreshes when you open it.
+    static let lowPowerInterval: Duration = .seconds(600)
 
     private(set) var dashboard: Dashboard?
     /// Set when the last refresh failed. Any previous dashboard is kept so the lists stay usable.
@@ -28,7 +30,8 @@ final class AppModel {
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refresh()
-                let delay = self.errorMessage == nil ? Self.refreshInterval : Self.retryInterval
+                let delay = self.errorMessage != nil ? Self.retryInterval
+                    : ProcessInfo.processInfo.isLowPowerModeEnabled ? Self.lowPowerInterval : Self.refreshInterval
                 try? await Task.sleep(for: delay)
             }
         }
@@ -51,6 +54,10 @@ final class AppModel {
             let dashboard = try await client.fetchDashboard()
             for pullRequest in dashboard.allPullRequests {
                 lastKnownPullRequests[pullRequest.url] = pullRequest
+            }
+            // Nothing on the first load: everything would be news.
+            if let previous = self.dashboard {
+                Notifier.post(dashboard.news(since: previous))
             }
             self.dashboard = dashboard
             errorMessage = nil

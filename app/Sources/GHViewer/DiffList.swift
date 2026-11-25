@@ -28,7 +28,7 @@ struct DiffList: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
                     ForEach(files) { file in
-                        let isExpanded = expanded[file.id] ?? !(viewed.contains(file.id) || file.isLarge)
+                        let isExpanded = expanded[file.id] ?? !(viewed.contains(file.id) || file.isLarge || file.isNoise)
                         let notes = annotations.notes[file.id] ?? DiffFileNotes()
                         Section {
                             if shownNotes.contains(file.id) && !notes.isEmpty {
@@ -39,6 +39,9 @@ struct DiffList: View {
                             } else if file.isLarge && !viewed.contains(file.id) {
                                 DiffNotice(text: "\(file.lineCount.formatted()) changed lines are hidden to keep scrolling fast.",
                                            buttonTitle: "Show Diff") { expanded[file.id] = true }
+                            } else if file.isNoise && !viewed.contains(file.id) {
+                                DiffNotice(text: "A lock, generated or data file, folded so the code stands out.",
+                                           buttonTitle: "Show Diff") { expanded[file.id] = true }
                             }
                             // Air between one file and the next.
                             Color.clear.frame(height: 14)
@@ -46,7 +49,8 @@ struct DiffList: View {
                             DiffFileHeader(file: file, isExpanded: isExpanded, isViewed: viewed.contains(file.id),
                                            canMarkViewed: review.canMarkViewed,
                                            notes: notes.isEmpty ? nil : notes.summary,
-                                           isShowingNotes: shownNotes.contains(file.id)) {
+                                           isShowingNotes: shownNotes.contains(file.id),
+                                           isCurrent: review.scrollRequest?.path == file.id) {
                                 expanded[file.id] = !isExpanded
                                 // Collapsing from deep inside a file would otherwise leave you in the next one.
                                 if isExpanded { proxy.scrollTo(file.id, anchor: .top) }
@@ -91,7 +95,8 @@ struct DiffList: View {
             let selected = file.rowRange(of: review.selection)
             ForEach(file.rows) { row in
                 // One view per row, so the lazy stack can count rows without building them.
-                DiffRowView(row: row, numberWidth: file.numberWidth, isSelected: selected?.contains(row.position) ?? false,
+                DiffRowView(row: row, numberWidth: file.numberWidth, path: file.id, emphasis: file.emphasis[row.position],
+                            isSelected: selected?.contains(row.position) ?? false,
                             // Hidden while that selection's own composer is open right below it.
                             actionSelection: selected?.upperBound == row.position && editor?.newComment != review.selection
                                 ? review.selection : nil,
@@ -144,6 +149,9 @@ struct DiffRowComments: Equatable {
 struct DiffRowView: View, Equatable {
     let row: DiffRow
     let numberWidth: CGFloat
+    let path: String
+    /// The characters that differ from the line this one replaced, if it's an edit.
+    let emphasis: Range<Int>?
     let isSelected: Bool
     /// Set on the selection's last row, which carries the action bar.
     let actionSelection: Selection?
@@ -163,7 +171,7 @@ struct DiffRowView: View, Equatable {
             DiffHunkRow(header: header, numberWidth: numberWidth)
         case .line(let line):
             VStack(alignment: .leading, spacing: 0) {
-                DiffLineRow(line: line, numberWidth: numberWidth, isSelected: isSelected)
+                DiffLineRow(line: line, numberWidth: numberWidth, path: path, emphasis: emphasis, isSelected: isSelected)
                     .onTapGesture(perform: select)
                     // One element per line, selectable with VoiceOver like a click.
                     .accessibilityElement(children: .combine)
@@ -199,7 +207,8 @@ struct DiffRowView: View, Equatable {
     }
 
     static func == (a: Self, b: Self) -> Bool {
-        a.row == b.row && a.numberWidth == b.numberWidth && a.isSelected == b.isSelected
+        a.row == b.row && a.numberWidth == b.numberWidth && a.path == b.path && a.emphasis == b.emphasis
+            && a.isSelected == b.isSelected
             && a.actionSelection == b.actionSelection && a.canComment == b.canComment && a.crossesHunks == b.crossesHunks
             && a.comments == b.comments && a.review === b.review
     }
@@ -209,6 +218,8 @@ struct DiffRowView: View, Equatable {
 struct DiffLineRow: View {
     let line: DiffLine
     let numberWidth: CGFloat
+    let path: String
+    let emphasis: Range<Int>?
     let isSelected: Bool
     @Environment(\.palette) private var palette
 
@@ -221,7 +232,8 @@ struct DiffLineRow: View {
             .foregroundStyle(.secondary)
             .padding(.trailing, 4)
             .background(isSelected ? palette.selection.opacity(DiffStyle.selectedOpacity) : tint.opacity(DiffStyle.gutterOpacity))
-            Text(verbatim: marker + line.text)
+            Text(DiffHighlight.attributed(marker: marker, text: line.text, path: path, emphasis: emphasis,
+                                          palette: palette, tint: tint))
                 .padding(.leading, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -274,6 +286,8 @@ struct DiffFileHeader: View {
     /// Summary of the comments listed from the header instead of under a line, if any.
     let notes: String?
     let isShowingNotes: Bool
+    /// The file the tree or the Review menu last went to; Mark as Viewed acts on it.
+    var isCurrent = false
     let toggleExpanded: () -> Void
     let toggleNotes: () -> Void
     let setViewed: (Bool) -> Void
@@ -317,7 +331,7 @@ struct DiffFileHeader: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.06),
+        .background(isCurrent ? AnyShapeStyle(.tint.opacity(0.18)) : AnyShapeStyle(Color.primary.opacity(0.06)),
                     in: .rect(topLeadingRadius: 8, bottomLeadingRadius: isExpanded ? 0 : 8,
                               bottomTrailingRadius: isExpanded ? 0 : 8, topTrailingRadius: 8))
         // Opaque behind the rounded card, so lines scrolling under a pinned header don't show at its corners.

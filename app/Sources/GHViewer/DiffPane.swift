@@ -46,6 +46,13 @@ struct DiffPane: View {
         .sheet(isPresented: $isSubmitPresented) {
             SubmitReviewSheet(review: review, submitted: submitted)
         }
+        .focusedSceneValue(\.reviewActions, ReviewActions(
+            nextFile: { goToFile(by: 1) },
+            previousFile: { goToFile(by: -1) },
+            toggleViewed: toggleViewedOnCurrentFile,
+            comment: commentOnSelection,
+            askAgent: { if review.selection != nil { review.chatFocusRequest = UUID() } },
+            submit: { if review.opened != nil { isSubmitPresented = true } }))
     }
 
     private var loaded: some View {
@@ -121,6 +128,37 @@ struct DiffPane: View {
 
     private func reload() {
         Task { await review.load() }
+    }
+
+    /// Moves the diff to the file after or before the current one: the one the tree or this last went to.
+    private func goToFile(by step: Int) {
+        let paths = files.map(\.id)
+        if let path = Self.path(after: review.scrollRequest?.path, by: step, in: paths) {
+            review.scrollRequest = DiffScrollRequest(path: path)
+        }
+    }
+
+    /// The first file when there's no current one; `nil` past either end.
+    static func path(after current: String?, by step: Int, in paths: [String]) -> String? {
+        guard let index = paths.firstIndex(where: { $0 == current }) else { return paths.first }
+        return paths.indices.contains(index + step) ? paths[index + step] : nil
+    }
+
+    /// Marks the current file, whose header is tinted, and moves on to the next one.
+    private func toggleViewedOnCurrentFile() {
+        guard let path = review.scrollRequest?.path, review.canMarkViewed else { return }
+        let wasViewed = review.isViewed(path)
+        setViewed(path, !wasViewed)
+        if !wasViewed { goToFile(by: 1) }
+    }
+
+    /// Opens the comment editor under the selected lines, where the Comment button would.
+    private func commentOnSelection() {
+        guard editor == nil, !review.isReloading, let selection = review.selection,
+              let file = files.first(where: { $0.id == selection.path }),
+              let rows = file.rowRange(of: selection), !file.crossesHunks(rows)
+        else { return }
+        editor = .newComment(selection)
     }
 
     /// Checking a file collapses it, as on GitHub, by dropping any collapse choice for it.
