@@ -231,6 +231,7 @@ final class PRReview {
             } else if stopReason == "unresponsive" {
                 // The core closed the session, so nothing more from that turn shows up.
                 chat.sessions[kind] = nil
+                forgetAgentsIfNone()
                 chat.append(.stopped)
                 chat.append(.info("\(kind.displayName) didn't stop, so its session was closed. The next question starts a new one."))
             } else if stopReason != "end_turn" {
@@ -334,6 +335,16 @@ final class PRReview {
 
     func apply(_ event: AgentEvent, sessionId: String) {
         chat.apply(event, sessionId: sessionId)
+        if case .disconnected = event {
+            forgetAgentsIfNone()
+        }
+    }
+
+    /// Once its last session is gone, this PR no longer counts toward the store's session limit.
+    private func forgetAgentsIfNone() {
+        if chat.sessions.isEmpty {
+            store.closedAgents(on: self)
+        }
     }
 }
 
