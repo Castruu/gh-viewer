@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, MCP_SERVER_NAME};
+use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, own_mcp_server_name};
 use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
 use crate::pr::{DraftAuthor, DraftStore, NewDraft, Prepared, PullRequestDetail, ReviewEvent, ReviewThread};
@@ -137,7 +137,7 @@ impl ReviewHub {
         }));
         let worktree = review.read().unwrap().checkout.worktree_path.clone();
         let server = McpServerHttp {
-            name: MCP_SERVER_NAME.into(),
+            name: own_mcp_server_name(),
             url: endpoint.url.clone(),
             headers: vec![HttpHeader {
                 name: "Authorization".into(),
