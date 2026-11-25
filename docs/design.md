@@ -100,13 +100,16 @@ enforces. If not, it returns an error the agent can act on. Otherwise it adds
 the comment to the PR's local drafts, and the UI shows it right away. The agent
 can never post to GitHub.
 
-**Submit.** One `addPullRequestReview` mutation carries the event (approve,
-request changes, or comment), the body, `commitOID` set to the drafts' pinned
-commit, and every draft as a `DraftPullRequestReviewThread`. If you already
-have a pending review on GitHub, each draft is added to it with
-`addPullRequestReviewThread`, skipping any already there, and then
-`submitPullRequestReview` submits it. Drafts are deleted only after GitHub
-accepts the review.
+**Submit.** Two steps, so a retry after a lost answer never posts a review
+twice. First the drafts go into a pending review: `addPullRequestReview`
+without an event starts one with `commitOID` set to the drafts' pinned commit
+and every draft as a `DraftPullRequestReviewThread`. If you already have a
+pending review on GitHub, each draft is added to it with
+`addPullRequestReviewThread` instead, skipping any already there. The pending
+review's id is saved on the drafts. Then `submitPullRequestReview` submits it
+with the event and body. A retry that finds no pending review checks the saved
+one: if it was submitted, the submit is done. Drafts are deleted only after
+GitHub accepts the review, and drafts added meanwhile stay.
 
 **Permissions.** ACP `session/request_permission` shows up as a prompt in the
 chat with the agent's own options. The app answers only what you pick, or

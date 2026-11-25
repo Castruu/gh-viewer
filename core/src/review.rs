@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, MCP_SERVER_NAME};
 use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
-use crate::pr::{DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread};
+use crate::pr::{DraftAuthor, DraftStore, NewDraft, Prepared, PullRequestDetail, ReviewEvent, ReviewThread};
 use crate::{CoreError, DiffSide, GitHubClient};
 
 /// PR descriptions longer than this are cut in prompts; the agent can read the rest with `get_pr_context`.
@@ -207,6 +207,7 @@ impl ReviewHub {
 
     /// Submits the PR's drafts as one review against the commit they were
     /// written on, then deletes the ones it sent. Returns the review's URL.
+    /// Retrying after any failure is safe: it never posts the review twice.
     pub async fn submit(
         &self,
         repo: String,
@@ -222,11 +223,27 @@ impl ReviewHub {
         };
         let drafts = self.drafts.list(repo.clone(), number)?;
         let commit = drafts.first().map(|d| d.commit_oid.clone()).unwrap_or(head);
-        let url = self
+        let earlier = drafts.iter().find_map(|draft| draft.review_id.clone());
+        let prepared = self
             .github
-            .submit_review(pull_request_id, commit, event, body, drafts.clone())
+            .prepare_review(&pull_request_id, &commit, &drafts, earlier.as_deref())
             .await?;
-        self.drafts.remove_submitted(&repo, number, &drafts)?;
+        let (review_id, url) = match prepared {
+            Prepared::Submitted(url) => (earlier.unwrap_or_default(), url),
+            Prepared::Pending(review_id) => {
+                // Recorded before submitting: if the answer is lost, a retry finds the review submitted.
+                let ids: Vec<String> = drafts.iter().map(|draft| draft.id.clone()).collect();
+                self.drafts.mark_in_review(&repo, number, &ids, &review_id)?;
+                let url = self.github.submit_pending_review(&review_id, event, &body).await?;
+                (review_id, url)
+            }
+        };
+        self.drafts.remove_reviewed(&repo, number, &review_id).map_err(|error| {
+            CoreError::Storage(format!(
+                "your review was posted ({url}), but its drafts couldn't be deleted ({error}). \
+                 Submitting again deletes them without posting the review twice."
+            ))
+        })?;
         Ok(url)
     }
 }

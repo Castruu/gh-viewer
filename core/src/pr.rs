@@ -82,10 +82,17 @@ const UNMARK_VIEWED: &str = r#"
 mutation($input: UnmarkFileAsViewedInput!) { unmarkFileAsViewed(input: $input) { clientMutationId } }
 "#;
 
-const SUBMIT_REVIEW: &str = r#"
+/// Without an event, this starts a pending review. Submitting is a second step,
+/// so a retry after a lost answer finds the review instead of posting another.
+const CREATE_PENDING: &str = r#"
 mutation($input: AddPullRequestReviewInput!) {
-  addPullRequestReview(input: $input) { pullRequestReview { url } }
+  addPullRequestReview(input: $input) { pullRequestReview { id } }
 }
+"#;
+
+/// A review an earlier submit started: still pending, submitted, or gone.
+const REVIEW_STATE: &str = r#"
+query($id: ID!) { node(id: $id) { ... on PullRequestReview { state url } } }
 "#;
 
 /// Everything the review window shows about one PR, apart from the diff.
@@ -104,11 +111,11 @@ pub struct PullRequestDetail {
     pub is_draft: bool,
     pub base_ref_name: String,
     pub head_ref_name: String,
-    /// The head commit; pass it to `submit_review` so the review lands on what you read.
+    /// GitHub's head commit when this was fetched. Thread lines refer to it.
     pub head_oid: String,
     pub files: Vec<ChangedFile>,
     pub threads: Vec<ReviewThread>,
-    /// A review you started on github.com and haven't submitted. `submit_review`
+    /// A review you started on github.com and haven't submitted. Submitting
     /// adds your drafts to it and submits it.
     pub pending_review: Option<PendingReview>,
 }
@@ -196,6 +203,10 @@ pub struct DraftComment {
     pub author: DraftAuthor,
     /// The commit whose diff the lines refer to. All of a PR's drafts share one.
     pub commit_oid: String,
+    /// The pending GitHub review a submit put this draft in. Recorded before the
+    /// review is submitted, so a retry can tell whether that went through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
 }
 
 /// Input to `DraftStore::add`: a draft before it has an id.
@@ -270,18 +281,29 @@ impl GitHubClient {
         let variables = json!({ "input": { "pullRequestId": pull_request_id, "path": path } });
         parse_mutation(&self.graphql(mutation, variables).await?).map(drop)
     }
+}
 
-    /// Submits a review with the drafts as comments; returns the review's URL.
-    /// If you have a pending review on github.com, it must be on `commit_oid`:
-    /// the drafts are added to it and it's submitted, so its comments go out too.
-    pub async fn submit_review(
+/// What the first phase of a submit leaves.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Prepared {
+    /// This pending review holds every draft; submit it.
+    Pending(String),
+    /// An earlier try's review was submitted, and only the answer was lost. Its URL.
+    Submitted(String),
+}
+
+impl GitHubClient {
+    /// Phase 1 of a submit: puts every draft into the viewer's pending review on
+    /// `commit_oid`, reusing one from github.com or an earlier try, else starting
+    /// one. `earlier` is the review an earlier try recorded on the drafts. If you
+    /// have a pending review, its comments go out with yours.
+    pub(crate) async fn prepare_review(
         &self,
-        pull_request_id: String,
-        commit_oid: String,
-        event: ReviewEvent,
-        body: String,
-        comments: Vec<DraftComment>,
-    ) -> Result<String, CoreError> {
+        pull_request_id: &str,
+        commit_oid: &str,
+        comments: &[DraftComment],
+        earlier: Option<&str>,
+    ) -> Result<Prepared, CoreError> {
         // Looked up fresh: it may have been started, submitted or half-filled by a failed try since the fetch.
         let lookup = format!("{PENDING_LOOKUP}{PENDING_REVIEWS}");
         let pending = parse_pending_lookup(
@@ -289,15 +311,28 @@ impl GitHubClient {
                 .graphql(&lookup, json!({ "id": pull_request_id }))
                 .await?,
         )?;
-        let Some(pending) = pending else {
-            let variables =
-                review_variables(&pull_request_id, &commit_oid, event, &body, &comments);
-            let data = parse_mutation(&self.graphql(SUBMIT_REVIEW, variables).await?)?;
-            return review_url(&data, "/addPullRequestReview/pullRequestReview/url");
+        let earlier = match (&pending, earlier) {
+            (None, Some(id)) => {
+                parse_review_state(&self.graphql(REVIEW_STATE, json!({ "id": id })).await?)?
+            }
+            _ => None,
+        };
+        let pending = match next_step(pending, earlier) {
+            Step::Extend(pending) => pending,
+            Step::Done(url) => return Ok(Prepared::Submitted(url)),
+            Step::Create => {
+                let variables = create_pending_variables(pull_request_id, commit_oid, comments);
+                let data = parse_mutation(&self.graphql(CREATE_PENDING, variables).await?)?;
+                return data
+                    .pointer("/addPullRequestReview/pullRequestReview/id")
+                    .and_then(Value::as_str)
+                    .map(|id| Prepared::Pending(id.to_owned()))
+                    .ok_or_else(|| CoreError::Api("GitHub's response had no review id".into()));
+            }
         };
 
-        check_pending_commit(&pending, &commit_oid)?;
-        let new = new_drafts(&comments, &pending.comments);
+        check_pending_commit(&pending, commit_oid)?;
+        let new = new_drafts(comments, &pending.comments);
         // Retrying after a failure is safe: drafts already in the pending review are skipped above.
         let partial = |added: usize, error: CoreError| {
             CoreError::Api(format!(
@@ -323,17 +358,67 @@ impl GitHubClient {
                 });
             result.map_err(|error| partial(added, error))?;
         }
-        self.graphql(
-            SUBMIT_PENDING,
-            submit_pending_variables(&pending.id, event, &body),
-        )
-        .await
-        .and_then(|response| parse_mutation(&response))
-        .and_then(|data| review_url(&data, "/submitPullRequestReview/pullRequestReview/url"))
-        .map_err(|error| match new.len() {
-            0 => error,
-            added => partial(added, error),
-        })
+        Ok(Prepared::Pending(pending.id))
+    }
+
+    /// Phase 2 of a submit: submits the pending review; returns its URL.
+    pub(crate) async fn submit_pending_review(
+        &self,
+        review_id: &str,
+        event: ReviewEvent,
+        body: &str,
+    ) -> Result<String, CoreError> {
+        self.graphql(SUBMIT_PENDING, submit_pending_variables(review_id, event, body))
+            .await
+            .and_then(|response| parse_mutation(&response))
+            .and_then(|data| review_url(&data, "/submitPullRequestReview/pullRequestReview/url"))
+            .map_err(|error| {
+                CoreError::Api(format!(
+                    "your comments are in a pending review on GitHub, but submitting it failed: {error}. \
+                     Retrying is safe: it won't post the review twice."
+                ))
+            })
+    }
+}
+
+/// A review an earlier submit started, as GitHub has it now.
+#[derive(Debug, PartialEq, Deserialize)]
+struct ReviewState {
+    state: String,
+    url: String,
+}
+
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Add the drafts it's missing to the viewer's pending review.
+    Extend(PendingReview),
+    /// An earlier try's review was submitted; this is its URL.
+    Done(String),
+    /// Start a pending review with every draft.
+    Create,
+}
+
+/// Decides phase 1 of a submit. `earlier` is the state of the review an earlier
+/// try started, looked up only when the viewer has no pending review.
+fn next_step(pending: Option<PendingReview>, earlier: Option<ReviewState>) -> Step {
+    match (pending, earlier) {
+        (Some(pending), _) => Step::Extend(pending),
+        // COMMENTED, APPROVED, CHANGES_REQUESTED and DISMISSED all mean it was submitted.
+        (None, Some(earlier)) if earlier.state != "PENDING" => Step::Done(earlier.url),
+        (None, _) => Step::Create,
+    }
+}
+
+/// Parses `REVIEW_STATE`. `None` when the review is gone, e.g. deleted on github.com.
+fn parse_review_state(body: &str) -> Result<Option<ReviewState>, CoreError> {
+    let (data, messages) = split_response(body)?;
+    match data.get("node") {
+        // An id that no longer resolves comes back as a null node with a NOT_FOUND error.
+        Some(Value::Null) => Ok(None),
+        Some(node) => serde_json::from_value(node.clone())
+            .map(Some)
+            .map_err(unexpected),
+        None => Err(api_error(messages)),
     }
 }
 
@@ -366,18 +451,16 @@ fn thread_input(draft: &DraftComment) -> Value {
     thread
 }
 
-/// Variables for `SUBMIT_REVIEW`: every draft becomes a `DraftPullRequestReviewThread`.
-fn review_variables(
+/// Variables for `CREATE_PENDING`: every draft becomes a `DraftPullRequestReviewThread`.
+/// No event, so the review stays pending; the body is sent when it's submitted.
+fn create_pending_variables(
     pull_request_id: &str,
     commit_oid: &str,
-    event: ReviewEvent,
-    body: &str,
     comments: &[DraftComment],
 ) -> Value {
     let threads: Vec<Value> = comments.iter().map(thread_input).collect();
     json!({ "input": {
-        "pullRequestId": pull_request_id, "commitOID": commit_oid,
-        "event": event_name(event), "body": body, "threads": threads,
+        "pullRequestId": pull_request_id, "commitOID": commit_oid, "threads": threads,
     } })
 }
 
@@ -483,7 +566,7 @@ fn parse_mutation(body: &str) -> Result<Value, CoreError> {
         return Ok(data);
     }
     // addPullRequestReview can't create a second review while one is pending.
-    // submit_review checks first, so this means one was started on github.com meanwhile.
+    // prepare_review checks first, so this means one was started on github.com meanwhile.
     if messages
         .iter()
         .any(|m| m.to_lowercase().contains("one pending review"))
@@ -809,6 +892,7 @@ impl DraftStore {
             body: draft.body,
             author: draft.author,
             commit_oid: draft.commit_oid,
+            review_id: None,
         };
         self.change(&repo, number, |drafts| {
             // Lines only mean something on one diff, and a review is submitted on one commit.
@@ -859,15 +943,31 @@ impl DraftStore {
 }
 
 impl DraftStore {
-    /// Deletes the drafts a review just sent. Drafts added while it was in flight stay.
-    pub(crate) fn remove_submitted(
+    /// Records that a submit put these drafts in the pending review `review_id`.
+    pub(crate) fn mark_in_review(
         &self,
         repo: &str,
         number: u64,
-        submitted: &[DraftComment],
+        ids: &[String],
+        review_id: &str,
     ) -> Result<(), CoreError> {
         self.change(repo, number, |drafts| {
-            drafts.retain(|draft| !submitted.contains(draft));
+            for draft in drafts.iter_mut().filter(|draft| ids.contains(&draft.id)) {
+                draft.review_id = Some(review_id.to_owned());
+            }
+            Ok(())
+        })
+    }
+
+    /// Deletes the drafts that went out in `review_id`. Drafts added since stay.
+    pub(crate) fn remove_reviewed(
+        &self,
+        repo: &str,
+        number: u64,
+        review_id: &str,
+    ) -> Result<(), CoreError> {
+        self.change(repo, number, |drafts| {
+            drafts.retain(|draft| draft.review_id.as_deref() != Some(review_id));
             Ok(())
         })
     }
@@ -1280,26 +1380,19 @@ mod tests {
                 name: "claude".into(),
             },
             commit_oid: "abc".into(),
+            review_id: None,
         }
     }
 
     #[test]
-    fn builds_review_variables() {
+    fn starts_a_pending_review_without_an_event() {
         let comments = [draft("1", None), draft("2", Some((8, DiffSide::Left)))];
-        let variables = review_variables(
-            "PR_1",
-            "abc",
-            ReviewEvent::RequestChanges,
-            "Needs work",
-            &comments,
-        );
+        let variables = create_pending_variables("PR_1", "abc", &comments);
         assert_eq!(
             variables,
             json!({ "input": {
             "pullRequestId": "PR_1",
             "commitOID": "abc",
-            "event": "REQUEST_CHANGES",
-            "body": "Needs work",
             "threads": [
                 { "path": "src/pr.rs", "line": 12, "side": "RIGHT", "body": "comment 1" },
                 { "path": "src/pr.rs", "line": 12, "side": "RIGHT", "startLine": 8, "startSide": "LEFT",
@@ -1311,10 +1404,65 @@ mod tests {
 
     #[test]
     fn maps_review_events() {
-        let event =
-            |event| review_variables("PR_1", "abc", event, "", &[])["input"]["event"].clone();
+        let event = |event| submit_pending_variables("PRR_1", event, "")["input"]["event"].clone();
         assert_eq!(event(ReviewEvent::Approve), "APPROVE");
+        assert_eq!(event(ReviewEvent::RequestChanges), "REQUEST_CHANGES");
         assert_eq!(event(ReviewEvent::Comment), "COMMENT");
+    }
+
+    #[test]
+    fn a_retry_never_posts_a_review_twice() {
+        let review = |state: &str| ReviewState {
+            state: state.into(),
+            url: "https://github.com/o/r/pull/7#pullrequestreview-9".into(),
+        };
+        let pending = PendingReview {
+            id: "PRR_1".into(),
+            commit_oid: "abc".into(),
+            comments: vec![],
+        };
+        // A pending review, from github.com or an earlier try, gets the drafts it's missing.
+        assert_eq!(
+            next_step(Some(pending.clone()), None),
+            Step::Extend(pending.clone())
+        );
+        assert_eq!(
+            next_step(Some(pending.clone()), Some(review("APPROVED"))),
+            Step::Extend(pending)
+        );
+        // The earlier try went through; only its answer was lost.
+        for state in ["COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"] {
+            assert_eq!(
+                next_step(None, Some(review(state))),
+                Step::Done("https://github.com/o/r/pull/7#pullrequestreview-9".into()),
+                "{state}"
+            );
+        }
+        // Nothing went through, or the earlier review was deleted.
+        assert_eq!(next_step(None, None), Step::Create);
+        assert_eq!(next_step(None, Some(review("PENDING"))), Step::Create);
+    }
+
+    #[test]
+    fn parses_an_earlier_reviews_state() {
+        let submitted = r#"{ "data": { "node": { "state": "APPROVED", "url": "https://github.com/o/r/pull/7#pullrequestreview-9" } } }"#;
+        assert_eq!(
+            parse_review_state(submitted).unwrap(),
+            Some(ReviewState {
+                state: "APPROVED".into(),
+                url: "https://github.com/o/r/pull/7#pullrequestreview-9".into()
+            })
+        );
+        let deleted = r#"{ "data": { "node": null },
+          "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a node with the global id of 'PRR_1'" } ] }"#;
+        assert_eq!(parse_review_state(deleted).unwrap(), None);
+        let failed = r#"{ "errors": [ { "message": "API rate limit exceeded" } ] }"#;
+        assert!(
+            parse_review_state(failed)
+                .unwrap_err()
+                .to_string()
+                .contains("rate limit")
+        );
     }
 
     #[test]
@@ -1625,14 +1773,23 @@ mod tests {
     }
 
     #[test]
-    fn removing_submitted_drafts_keeps_ones_added_meanwhile() {
+    fn removes_only_the_drafts_a_review_sent() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
-        store.add("o/r".into(), 7, new_draft("sent")).unwrap();
-        let submitted = store.list("o/r".into(), 7).unwrap();
+        let sent = store.add("o/r".into(), 7, new_draft("sent")).unwrap();
+        store.mark_in_review("o/r", 7, &[sent.id], "PRR_1").unwrap();
+        // Survives a restart, so a retry after a lost answer still knows the review.
+        assert_eq!(
+            DraftStore::new(dir.path().to_str().unwrap().into())
+                .list("o/r".into(), 7)
+                .unwrap()[0]
+                .review_id
+                .as_deref(),
+            Some("PRR_1")
+        );
         // An agent drafts while GitHub is still answering.
         let late = store.add("o/r".into(), 7, new_draft("late")).unwrap();
-        store.remove_submitted("o/r", 7, &submitted).unwrap();
+        store.remove_reviewed("o/r", 7, "PRR_1").unwrap();
         assert_eq!(store.list("o/r".into(), 7).unwrap(), [late]);
     }
 
