@@ -252,33 +252,40 @@ impl GitHubClient {
             CoreError::Api(format!("invalid repo {repo:?}, expected \"owner/name\""))
         })?;
         let query = format!("{PR_QUERY}{PENDING_REVIEWS}");
-        let mut variables = json!({
-            "owner": owner, "name": name, "number": number,
-            "withFiles": true, "withThreads": true,
-        });
-
-        let first = parse_pr_page(
-            &self.graphql(&query, variables.clone()).await?,
-            &repo,
-            number,
-        )?;
-        let mut detail = first.detail;
-        let (mut files_after, mut threads_after) = (first.files_after, first.threads_after);
-        while files_after.is_some() || threads_after.is_some() {
-            variables["withFiles"] = files_after.is_some().into();
-            variables["filesAfter"] = files_after.into();
-            variables["withThreads"] = threads_after.is_some().into();
-            variables["threadsAfter"] = threads_after.into();
-            let page = parse_pr_page(
+        // A push between pages mixes two heads' threads, so that read starts over, once.
+        for _ in 0..2 {
+            let mut variables = json!({
+                "owner": owner, "name": name, "number": number,
+                "withFiles": true, "withThreads": true,
+            });
+            let first = parse_pr_page(
                 &self.graphql(&query, variables.clone()).await?,
                 &repo,
                 number,
             )?;
-            detail.files.extend(page.detail.files);
-            detail.threads.extend(page.detail.threads);
-            (files_after, threads_after) = (page.files_after, page.threads_after);
+            let mut detail = first.detail;
+            let (mut files_after, mut threads_after) = (first.files_after, first.threads_after);
+            let mut mixed = false;
+            while !mixed && (files_after.is_some() || threads_after.is_some()) {
+                variables["withFiles"] = files_after.is_some().into();
+                variables["filesAfter"] = files_after.into();
+                variables["withThreads"] = threads_after.is_some().into();
+                variables["threadsAfter"] = threads_after.into();
+                let page = parse_pr_page(
+                    &self.graphql(&query, variables.clone()).await?,
+                    &repo,
+                    number,
+                )?;
+                mixed = !merge_page(&mut detail, page.detail);
+                (files_after, threads_after) = (page.files_after, page.threads_after);
+            }
+            if !mixed {
+                return Ok(detail);
+            }
         }
-        Ok(detail)
+        Err(CoreError::Api(format!(
+            "{repo}#{number} got new commits while it loaded, twice. Try again."
+        )))
     }
 
     /// Syncs GitHub's per-file "Viewed" checkbox.
@@ -869,6 +876,17 @@ fn parse_pr_page(body: &str, repo: &str, number: u64) -> Result<PrPage, CoreErro
         files_after,
         threads_after,
     })
+}
+
+/// Adds a later page of a PR to its first. False if the page is on another head,
+/// after a push between them: its thread lines refer to another diff.
+fn merge_page(detail: &mut PullRequestDetail, page: PullRequestDetail) -> bool {
+    if page.head_oid != detail.head_oid {
+        return false;
+    }
+    detail.files.extend(page.files);
+    detail.threads.extend(page.threads);
+    true
 }
 
 /// Parses `PENDING_LOOKUP`. Any error fails, since a mutation follows.
@@ -1627,6 +1645,20 @@ mod tests {
         assert!(page.detail.files.is_empty());
         assert_eq!(page.detail.pending_review, None);
         assert_eq!((page.files_after, page.threads_after), (None, None));
+    }
+
+    #[test]
+    fn notices_a_push_between_pages() {
+        let first = || parse_pr_page(PR_RESPONSE, "o/r", 42).unwrap().detail;
+        let mut detail = first();
+        let mut later = first();
+        assert!(merge_page(&mut detail, later.clone()));
+        assert_eq!(detail.threads.len(), 2 * later.threads.len());
+
+        let mut detail = first();
+        later.head_oid = "f00dfeed".into();
+        assert!(!merge_page(&mut detail, later));
+        assert_eq!(detail, first());
     }
 
     #[test]
