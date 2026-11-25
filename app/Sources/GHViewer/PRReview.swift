@@ -22,8 +22,8 @@ final class PRReview {
     /// The last successful load. Kept while reloading or after a failed reload.
     private(set) var opened: OpenedReview?
     private(set) var drafts: [DraftComment] = []
-    /// Ids of drafts already in your pending review on GitHub from an unsettled submit; they can't change here.
-    private(set) var draftsInReview: Set<String> = []
+    /// A submit that put drafts in your pending review on GitHub and hasn't been settled.
+    private(set) var unsettled: UnsettledSubmit?
     /// Set when an action fails (viewed toggle, draft edit, submit); shown by the views.
     var actionError: String?
     /// The diff lines the user selected. Questions to the agent include them.
@@ -82,7 +82,7 @@ final class PRReview {
     func reloadDrafts() {
         do {
             drafts = try store.drafts.list(repo: repo, number: number)
-            draftsInReview = Set(try store.drafts.inReview(repo: repo, number: number))
+            unsettled = try store.drafts.unsettled(repo: repo, number: number)
         } catch {
             actionError = error.coreMessage
         }
@@ -143,9 +143,22 @@ final class PRReview {
         perform { try self.store.drafts.remove(repo: self.repo, number: self.number, id: id) }
     }
 
-    /// Deletes every draft, which also unpins the diff on the next load.
+    /// Ids of drafts already in your pending review on GitHub; they can't change here.
+    var draftsInReview: Set<String> {
+        Set(unsettled?.draftIds ?? [])
+    }
+
+    /// Deletes every draft, which also unpins the diff on the next load. Nothing is deleted on GitHub:
+    /// a pending review an unsettled submit left there stays, and the result says so.
     func discardDrafts() async {
-        perform { try self.store.drafts.clear(repo: self.repo, number: self.number) }
+        do {
+            if let pending = try await store.hub.discard(repo: repo, number: number) {
+                actionError = "Your drafts are deleted here, but your review with them is still pending on github.com. Submit or delete it there: \(pending)"
+            }
+        } catch {
+            actionError = error.coreMessage
+        }
+        reloadDrafts()
         await load()
     }
 

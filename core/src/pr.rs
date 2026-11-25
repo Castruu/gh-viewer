@@ -218,6 +218,14 @@ pub struct DraftComment {
     pub commit_oid: String,
 }
 
+/// A submit whose drafts are in your pending review on GitHub, not yet settled.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct UnsettledSubmit {
+    pub review_url: String,
+    /// The drafts in that review. They can't be edited or deleted here.
+    pub draft_ids: Vec<String>,
+}
+
 /// Input to `DraftStore::add`: a draft before it has an id.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct NewDraft {
@@ -522,6 +530,16 @@ pub(crate) struct RemoteReview {
     /// Empty if GitHub no longer has the commit.
     pub commit_oid: String,
     pub comments: Vec<PendingComment>,
+}
+
+/// Whether a looked-up review may still be pending on github.com. Without an
+/// answer, it may be.
+pub(crate) fn may_be_pending(lookup: &Result<Option<RemoteReview>, CoreError>) -> bool {
+    match lookup {
+        Ok(Some(review)) => review.state == "PENDING",
+        Ok(None) => false,
+        Err(_) => true,
+    }
 }
 
 /// What an earlier submit's review, as GitHub has it now, means for this one.
@@ -1190,23 +1208,28 @@ impl DraftStore {
         })
     }
 
-    /// Ids of drafts already in your pending review on GitHub, from a submit that
-    /// hasn't been settled yet. Editing them here wouldn't change what's posted.
-    pub fn in_review(&self, repo: String, number: u64) -> Result<Vec<String>, CoreError> {
-        Ok(self
-            .attempt(&repo, number)?
-            .map(|attempt| attempt.drafts.into_iter().map(|draft| draft.id).collect())
-            .unwrap_or_default())
+    /// A submit that put drafts in your pending review on GitHub and hasn't been
+    /// settled. Editing those drafts here wouldn't change what's on GitHub.
+    pub fn unsettled(
+        &self,
+        repo: String,
+        number: u64,
+    ) -> Result<Option<UnsettledSubmit>, CoreError> {
+        Ok(self.attempt(&repo, number)?.map(|attempt| UnsettledSubmit {
+            review_url: attempt.review_url,
+            draft_ids: attempt.drafts.into_iter().map(|draft| draft.id).collect(),
+        }))
     }
 
-    /// Deletes the PR's drafts and the record of an unfinished submit. A pending
-    /// review that submit started stays on github.com, as yours.
+    /// Deletes the PR's drafts, then the record of an unsettled submit. A pending
+    /// review that submit left on github.com stays there; nothing is deleted on GitHub.
     pub fn clear(&self, repo: String, number: u64) -> Result<(), CoreError> {
-        write_file(&self.attempt_path(&repo, number)?, None)?;
+        // Drafts first: if the record can't go, it still guards against posting twice.
         self.change(&repo, number, |drafts| {
             drafts.clear();
             Ok(())
-        })
+        })?;
+        write_file(&self.attempt_path(&repo, number)?, None)
     }
 }
 
@@ -1903,11 +1926,27 @@ mod tests {
         let store = store(&dir);
         let sent = store.add("o/r".into(), 7, new_draft("sent")).unwrap();
         store.add("o/r".into(), 7, new_draft("late")).unwrap();
-        assert!(store.in_review("o/r".into(), 7).unwrap().is_empty());
+        assert_eq!(store.unsettled("o/r".into(), 7).unwrap(), None);
         store
             .save_attempt("o/r", 7, Some(&attempt(vec![sent.clone()])))
             .unwrap();
-        assert_eq!(store.in_review("o/r".into(), 7).unwrap(), [sent.id]);
+        assert_eq!(
+            store.unsettled("o/r".into(), 7).unwrap(),
+            Some(UnsettledSubmit {
+                review_url: "https://github.com/o/r/pull/7#pullrequestreview-9".into(),
+                draft_ids: vec![sent.id],
+            })
+        );
+    }
+
+    #[test]
+    fn a_discarded_review_is_still_pending_unless_github_says_otherwise() {
+        let (_, review, _) = recovery_case("PENDING");
+        assert!(may_be_pending(&Ok(Some(review.clone()))));
+        assert!(may_be_pending(&Err(CoreError::Network("offline".into()))));
+        assert!(!may_be_pending(&Ok(None)));
+        let submitted = RemoteReview { state: "APPROVED".into(), ..review };
+        assert!(!may_be_pending(&Ok(Some(submitted))));
     }
 
     #[test]

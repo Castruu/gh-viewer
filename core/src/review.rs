@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, STOP_UNRESPONSIVE, own_mcp_server_name};
 use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable, remove_agent_config};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
-use crate::pr::{DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread, Submission};
+use crate::pr::{
+    DraftAuthor, DraftStore, NewDraft, PullRequestDetail, ReviewEvent, ReviewThread, Submission, may_be_pending,
+};
 use crate::{CoreError, DiffSide, GitHubClient};
 
 /// PR descriptions longer than this are cut in prompts; the agent can read the rest with `get_pr_context`.
@@ -254,6 +256,21 @@ impl ReviewHub {
         let commit_oid = drafts.first().map(|d| d.commit_oid.clone()).unwrap_or(head);
         let submission = Submission { pull_request_id, commit_oid, event, body, drafts };
         self.github.submit_review(&self.drafts, &repo, number, submission).await
+    }
+
+    /// Deletes the PR's drafts and the record of an unsettled submit, never
+    /// anything on GitHub. Returns the link of that submit's review if it may
+    /// still be pending on github.com, for the reviewer to submit or delete there.
+    pub async fn discard(&self, repo: String, number: u64) -> Result<Option<String>, CoreError> {
+        let key = (repo.clone(), number);
+        // Not while a submit of this PR is running.
+        let submitting = self.submits.lock().unwrap().entry(key).or_default().clone();
+        let _submitting = submitting.lock().await;
+        let record = self.drafts.attempt(&repo, number)?;
+        self.drafts.clear(repo, number)?;
+        let Some(record) = record else { return Ok(None) };
+        let lookup = self.github.remote_review(&record.review_id).await;
+        Ok(may_be_pending(&lookup).then_some(record.review_url))
     }
 }
 

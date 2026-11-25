@@ -125,7 +125,11 @@ struct DiffPane: View {
                     Task { await review.discardDrafts() }
                 }
             } message: {
-                Text("Your drafts and the agent's are deleted. They were never submitted, so they can't be recovered.")
+                if let pending = review.unsettled?.reviewUrl {
+                    Text("Your drafts and the agent's are deleted here. Some are already in your pending review on github.com, which stays there: submit or delete it there (\(pending)).")
+                } else {
+                    Text("Your drafts and the agent's are deleted. They haven't been posted, so they can't be recovered.")
+                }
             }
         }
     }
