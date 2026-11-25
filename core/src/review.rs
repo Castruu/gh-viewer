@@ -157,11 +157,11 @@ impl ReviewHub {
         question: String,
     ) -> Result<String, CoreError> {
         let (key, primed, turn_head) = {
-            let mut sessions = self.sessions.lock().unwrap();
+            let sessions = self.sessions.lock().unwrap();
             let info = sessions
-                .get_mut(&session_id)
+                .get(&session_id)
                 .ok_or_else(|| CoreError::Agent("This agent session has ended. Start a new one.".into()))?;
-            (info.key.clone(), std::mem::replace(&mut info.primed, true), info.turn_head.clone())
+            (info.key.clone(), info.primed, info.turn_head.clone())
         };
         let text = {
             let review = self.review(&key)?;
@@ -169,7 +169,12 @@ impl ReviewHub {
             *turn_head.lock().unwrap() = review.checkout.head_oid.clone();
             build_prompt(&review, !primed, selection.as_ref(), &question)
         };
-        self.agents.prompt(session_id, text).await
+        let stop_reason = self.agents.prompt(session_id.clone(), text).await?;
+        // Only now: a prompt that failed, e.g. before signing in, never reached the agent.
+        if let Some(info) = self.sessions.lock().unwrap().get_mut(&session_id) {
+            info.primed = true;
+        }
+        Ok(stop_reason)
     }
 
     pub fn cancel(&self, session_id: String) {
