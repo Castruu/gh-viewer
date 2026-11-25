@@ -379,9 +379,10 @@ impl CheckoutManager {
 /// hooks, MCP servers and permissions that the PR's author would run on this
 /// machine. The diff is between commits, so it still shows them.
 pub(crate) async fn hide_agent_config(wt: &str) -> Result<String, String> {
+    // No trailing slash: a PR's `.codex` may be a symlink or a file, not only a directory.
     git(&[
         "-C", wt, "sparse-checkout", "set", "--no-cone",
-        "/*", "!/.claude/", "!/.codex/", "!/.mcp.json",
+        "/*", "!/.claude", "!/.codex", "!/.mcp.json",
     ])
     .await
 }
@@ -1072,16 +1073,30 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
         commit(&work, &config);
         run(&work, &["push", "-q", &remote, "HEAD:refs/pull/1/head"]);
 
+        // PR 2 makes them symlinks to a tracked directory holding the config.
+        run(&work, &["rm", "-q", "-r", ".codex", ".claude"]);
+        std::fs::create_dir_all(format!("{work}/cfg")).unwrap();
+        for link in [".codex", ".claude"] {
+            std::os::unix::fs::symlink("cfg", format!("{work}/{link}")).unwrap();
+        }
+        commit(&work, &[("cfg/config.toml", "[mcp_servers.x]\n"), ("cfg/settings.json", "{}\n")]);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/pull/2/head"]);
+
         let manager =
             CheckoutManager::with_remote_base(format!("{tmp}/data"), format!("file://{tmp}/remote/"));
-        let checkout = manager.prepare("octo/demo".into(), 1, "main".into(), None).await.unwrap();
-        let wt = &checkout.worktree_path;
-        for hidden in [".codex", ".claude", ".mcp.json"] {
-            assert!(!Path::new(&format!("{wt}/{hidden}")).exists(), "{hidden}");
+        for number in [1, 2] {
+            let checkout = manager.prepare("octo/demo".into(), number, "main".into(), None).await.unwrap();
+            let wt = &checkout.worktree_path;
+            for hidden in [".codex", ".claude", ".mcp.json"] {
+                // Not following symlinks: a link that's there is a link the agent follows.
+                assert!(std::fs::symlink_metadata(format!("{wt}/{hidden}")).is_err(), "#{number} {hidden}");
+            }
+            assert_eq!(read(wt, "a.txt"), "one\n");
+            assert_eq!(read(wt, "src/.claude/notes.md"), "kept\n");
+            if number == 1 {
+                assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
+            }
         }
-        assert_eq!(read(wt, "a.txt"), "one\n");
-        assert_eq!(read(wt, "src/.claude/notes.md"), "kept\n");
-        assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
     }
 
     #[tokio::test]
