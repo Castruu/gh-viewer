@@ -24,7 +24,7 @@ edit and submit those.
 | 5c | Agent drafts don't need accepting. They're sent like yours, but the submit sheet lists them separately under "Drafted by Claude/Codex". |
 | 5d | Comments in your github.com pending review show inline in the diff as read-only "Pending on GitHub" cards. |
 | 6 | The app passes through each agent's own permission settings and adds no default of its own. Permission requests show in the chat. The one exception: calls to the app's own MCP tools (`get_pr_context`, `list_review_threads`, `draft_comment`) are allowed once automatically, because they're local and reversible. |
-| 6a | Agent sessions load only your own settings, never the PR's, so opening a PR can't run its hooks or MCP servers. Worktrees are sparse checkouts without `/.claude/`, `/.codex/` and `/.mcp.json`, and Claude sessions also get `settingSources: ["user"]`. The sparse checkout is needed because codex-acp trusts every session folder and claude-agent-acp reads the project's permission mode regardless. Those files still show in the diff, but agents can't read them from disk. |
+| 6a | Agent sessions load only your own settings, never the PR's, so opening a PR can't run its hooks or MCP servers. Worktrees are sparse checkouts without `/.claude`, `/.codex` and `/.mcp.json`, whatever their type, and those are also removed before each session starts. Claude sessions also get `settingSources: ["user"]`. The sparse checkout is needed because codex-acp trusts every session folder and claude-agent-acp reads the project's permission mode regardless. Those files still show in the diff, but agents can't read them from disk. |
 | 7 | We build the chat UI (streaming text, tool calls, permission prompts) and a diff view that stays fast on large PRs. |
 | 7b | Chat transcripts are saved per PR and shown again after a restart. The agent's session doesn't survive a restart, so a note marks where the new session starts. "Clear Chat" deletes a transcript. Markdown tables in replies are drawn as tables. |
 | 7a | Themes: Argus's four palettes (Cool by default, Soft, Focus, Vivid) set the accent colors: statuses, the waiting dot, repo names, diff tints, selection and agent drafts. Each palette has a dark variant (Argus's colors) and a light variant. A separate Appearance setting picks System, Light or Dark. Both are chosen from the palette button in the toolbar (click for the next palette, hold to choose) and remembered. |
@@ -139,14 +139,21 @@ file-system or terminal capabilities, so agents use their built-in tools inside
 the worktree.
 
 The worktree holds the PR author's code, and agents read config from their cwd.
-So worktrees are sparse checkouts without `/.claude/`, `/.codex/` and
-`/.mcp.json`, and Claude sessions load only the user's own settings
+So worktrees are sparse checkouts without `/.claude`, `/.codex` and
+`/.mcp.json` (no trailing slash, so a symlink or file is excluded too). A
+worktree is added with no checkout, gets the patterns, and only then checks out
+the head, so those paths never exist on disk. They're also removed, without
+following symlinks, right before each session starts, in case an agent wrote
+them. Claude sessions load only the user's own settings
 (`settingSources: ["user"]`). Otherwise a PR's hooks and MCP servers would run
 on the reviewer's machine; codex-acp trusts every session root, so Codex would
-load the PR's `.codex/config.toml`.
+load the PR's `.codex/config.toml`. The sparse checkout needs git 2.35; the
+core uses the first git it finds that's new enough.
 
-Stop sends `session/cancel`. If the agent hasn't ended the turn 5 s later, the
-core stops waiting and reports it as cancelled.
+Stop sends `session/cancel` for that question's turn only. If the agent hasn't
+ended the turn 5 s later, the core closes the session (`session/close`, MCP
+endpoint revoked) and drops whatever it sends later; the next question opens a
+new session. Agent sessions stay open for the 5 most recently used PRs.
 
 ## Not in v1
 
