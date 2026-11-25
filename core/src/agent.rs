@@ -196,7 +196,7 @@ struct Shared {
     failed_mcp: HashSet<(String, String)>,
     /// Sessions closed or gone. What they still send is dropped, so a stopped
     /// turn can't stream or ask for permission into the next one.
-    retired: HashSet<String>,
+    retired: HashSet<(u64, String)>,
 }
 
 impl Shared {
@@ -223,8 +223,9 @@ impl Shared {
     /// requests answers them as cancelled.
     fn forget(&mut self, gone: &[String]) {
         for session_id in gone {
-            self.sessions.remove(session_id);
-            self.retired.insert(session_id.clone());
+            if let Some(session) = self.sessions.remove(session_id) {
+                self.retired.insert((session.process, session_id.clone()));
+            }
         }
         self.permissions.retain(|_, pending| !gone.contains(&pending.session_id));
         self.own_codex_calls.retain(|(session_id, _), _| !gone.contains(session_id));
@@ -240,11 +241,20 @@ struct Session {
     /// Woken by `cancel`, so a turn the agent never ends can still stop.
     /// Set by Stop until the turn ends. Latched, so a Stop that comes before
     /// `prompt` waits on it still counts.
-    stop: Arc<tokio::sync::watch::Sender<bool>>,
+    stop: Arc<tokio::sync::watch::Sender<Stopped>>,
     /// Names of the app's MCP servers passed in `session/new`.
     mcp_servers: Vec<String>,
     /// Whether the adapter supports `session/close`.
     closes: bool,
+}
+
+/// Which turn of a session Stop was pressed for.
+#[derive(Debug, Clone, PartialEq)]
+enum Stopped {
+    No,
+    Turn(String),
+    /// The session is being closed: whatever turn runs.
+    All,
 }
 
 struct PendingPermission {
@@ -358,7 +368,7 @@ impl AgentHub {
             kind,
             process: process.id,
             cx: process.cx,
-            stop: Arc::new(tokio::sync::watch::channel(false).0),
+            stop: Arc::new(tokio::sync::watch::channel(Stopped::No).0),
             mcp_servers: names,
             closes: process.closes,
         };
@@ -367,56 +377,26 @@ impl AgentHub {
     }
 
     /// Sends a user turn; resolves with the stop reason ("end_turn", "cancelled",
-    /// [`STOP_UNRESPONSIVE`], …) when the turn ends.
-    pub async fn prompt(&self, session_id: String, text: String) -> Result<String, CoreError> {
-        let (kind, cx, stop) = self
-            .shared()
-            .sessions
-            .get(&session_id)
-            .map(|session| (session.kind, session.cx.clone(), session.stop.clone()))
-            .ok_or_else(|| {
-                CoreError::Agent("This agent session has ended. Start a new one.".into())
-            })?;
-        let mut stopped = stop.subscribe();
-        // Stopped before the turn reached the agent.
-        if stop.send_replace(false) {
-            return Ok("cancelled".into());
-        }
-        let request = acp::PromptRequest::new(session_id.clone(), vec![text.into()]);
-        // An agent that never answers, e.g. one waiting on a hook, must not keep the turn after Stop.
-        let gave_up = async {
-            let _ = stopped.wait_for(|stopped| *stopped).await;
-            tokio::time::sleep(CANCEL_GRACE).await;
-        };
-        let response = tokio::select! {
-            response = cx.send_request(request).block_task() => response,
-            () = gave_up => {
-                // Its turn may still go on, e.g. once the hook returns: retire the session.
-                self.close_session(session_id);
-                return Ok(STOP_UNRESPONSIVE.into());
-            }
-        };
-        stop.send_replace(false);
-        let response = response
-            .map_err(|error| {
-                signed_out(kind, &error)
-                    .unwrap_or_else(|| CoreError::Agent(format!("{}: {error}", kind.name())))
-            })?;
-        Ok(wire_name(&response.stop_reason))
+    /// [`STOP_UNRESPONSIVE`], …) when the turn ends. `turn_id` names the turn
+    /// for [`AgentHub::cancel`].
+    pub async fn prompt(&self, session_id: String, turn_id: String, text: String) -> Result<String, CoreError> {
+        Ok(self.prompt_turn(session_id, turn_id, text).await?.0)
     }
 
-    /// Asks the agent to stop the current turn. `prompt` then resolves with
+    /// Asks the agent to stop turn `turn_id`. `prompt` then resolves with
     /// "cancelled", or [`STOP_UNRESPONSIVE`] if the agent doesn't end the turn.
-    /// Sends one `session/cancel` per turn however often it's called.
-    pub fn cancel(&self, session_id: String) {
+    /// Sends one `session/cancel` per turn however often it's called, and a
+    /// Stop for a turn that already ended doesn't touch the next one.
+    pub fn cancel(&self, session_id: String, turn_id: String) {
         let mut shared = self.shared();
-        if let Some(session) = shared.sessions.get(&session_id)
-            && !session.stop.send_replace(true)
-        {
-            // Only fails if the connection is already gone, which ends the turn anyway.
-            let _ = session
-                .cx
-                .send_notification(acp::CancelNotification::new(session_id.clone()));
+        if let Some(session) = shared.sessions.get(&session_id) {
+            let stop = Stopped::Turn(turn_id);
+            if session.stop.send_replace(stop.clone()) != stop {
+                // Only fails if the connection is already gone, which ends the turn anyway.
+                let _ = session
+                    .cx
+                    .send_notification(acp::CancelNotification::new(session_id.clone()));
+            }
         }
         // ACP requires answering the turn's open permission requests as cancelled.
         shared
@@ -428,16 +408,20 @@ impl AgentHub {
     /// as cancelled and, when the adapter supports it, sends `session/close` so
     /// the agent frees it (Claude keeps a CLI process per session).
     pub fn close_session(&self, session_id: String) {
-        self.cancel(session_id.clone());
         let mut shared = self.shared();
-        if let Some(session) = shared.sessions.get(&session_id)
-            && session.closes
-        {
-            // The session is gone for the app either way, so the reply doesn't matter.
-            session
-                .cx
-                .send_request(acp::CloseSessionRequest::new(session_id.clone()))
-                .detach();
+        if let Some(session) = shared.sessions.get(&session_id) {
+            if session.stop.send_replace(Stopped::All) == Stopped::No {
+                let _ = session
+                    .cx
+                    .send_notification(acp::CancelNotification::new(session_id.clone()));
+            }
+            if session.closes {
+                // The session is gone for the app either way, so the reply doesn't matter.
+                session
+                    .cx
+                    .send_request(acp::CloseSessionRequest::new(session_id.clone()))
+                    .detach();
+            }
         }
         shared.forget(&[session_id]);
     }
@@ -452,6 +436,61 @@ impl AgentHub {
 }
 
 impl AgentHub {
+    /// [`AgentHub::prompt`], and whether the turn reached the agent: not when
+    /// it was stopped before it was sent.
+    pub(crate) async fn prompt_turn(
+        &self,
+        session_id: String,
+        turn_id: String,
+        text: String,
+    ) -> Result<(String, bool), CoreError> {
+        let (kind, cx, stop) = self
+            .shared()
+            .sessions
+            .get(&session_id)
+            .map(|session| (session.kind, session.cx.clone(), session.stop.clone()))
+            .ok_or_else(|| {
+                CoreError::Agent("This agent session has ended. Start a new one.".into())
+            })?;
+        let mut stopped = stop.subscribe();
+        // A Stop for this turn came before it was sent; one for an earlier turn is stale.
+        if stop.send_replace(Stopped::No) == Stopped::Turn(turn_id.clone()) {
+            return Ok(("cancelled".into(), false));
+        }
+        let request = acp::PromptRequest::new(session_id.clone(), vec![text.into()]);
+        // An agent that never answers, e.g. one waiting on a hook, must not keep the turn after Stop.
+        let gave_up = async {
+            let _ = stopped
+                .wait_for(|stopped| match stopped {
+                    Stopped::Turn(stopped) => *stopped == turn_id,
+                    other => *other == Stopped::All,
+                })
+                .await;
+            tokio::time::sleep(CANCEL_GRACE).await;
+        };
+        let response = tokio::select! {
+            response = cx.send_request(request).block_task() => response,
+            () = gave_up => {
+                // Its turn may still go on, e.g. once the hook returns: retire the session.
+                self.close_session(session_id);
+                return Ok((STOP_UNRESPONSIVE.into(), true));
+            }
+        };
+        stop.send_if_modified(|stopped| {
+            let ours = *stopped == Stopped::Turn(turn_id.clone());
+            if ours {
+                *stopped = Stopped::No;
+            }
+            ours
+        });
+        let response = response
+            .map_err(|error| {
+                signed_out(kind, &error)
+                    .unwrap_or_else(|| CoreError::Agent(format!("{}: {error}", kind.name())))
+            })?;
+        Ok((wire_name(&response.stop_reason), true))
+    }
+
     fn with_launcher(listener: Arc<dyn AgentListener>, launch: Launcher) -> Self {
         Self {
             listener,
@@ -492,7 +531,7 @@ impl AgentHub {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let connection =
-            self.client(kind)
+            self.client(kind, id)
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                     let _ = ready_tx.send(cx.clone());
                     tokio::select! {
@@ -520,6 +559,8 @@ impl AgentHub {
                     .map(|(session_id, _)| session_id.clone())
                     .collect();
                 shared.forget(&gone);
+                // Nothing more comes from this process.
+                shared.retired.retain(|(process, _)| *process != id);
                 gone
             };
             for session_id in gone {
@@ -588,6 +629,7 @@ impl AgentHub {
     fn client(
         &self,
         kind: AgentKind,
+        process: u64,
     ) -> agent_client_protocol::v1::Builder<
         Client,
         impl agent_client_protocol::HandleDispatchFrom<Agent> + 'static,
@@ -604,7 +646,7 @@ impl AgentHub {
                     let session_id = notification.session_id.to_string();
                     let mut update = notification.update;
                     let mut shared = lock(&notification_shared);
-                    if shared.retired.contains(&session_id) {
+                    if shared.retired.contains(&(process, session_id.clone())) {
                         return Ok(());
                     }
                     if kind == AgentKind::Codex {
@@ -637,7 +679,12 @@ impl AgentHub {
                     let request_id = {
                         let mut shared = lock(&shared);
                         let own = shared.own_servers(&session_id);
-                        let now = if shared.retired.contains(&session_id) {
+                        // A stopped turn, still in its grace period, gets no new questions.
+                        let stopping = shared
+                            .sessions
+                            .get(&session_id)
+                            .is_some_and(|session| *session.stop.borrow() != Stopped::No);
+                        let now = if stopping || shared.retired.contains(&(process, session_id.clone())) {
                             Some(acp::RequestPermissionOutcome::Cancelled)
                         } else {
                             auto_allow(kind, &json, &own, &mut shared.own_codex_calls).map(|option_id| {
@@ -1140,6 +1187,7 @@ mod tests {
                     }
                     let own_tool = request.prompt == [acp::ContentBlock::from("own tool")];
                     let hang = request.prompt == [acp::ContentBlock::from("hang")];
+                    let ask_late = request.prompt == [acp::ContentBlock::from("ask after stop")];
                     let session_id = request.session_id;
                     let task_cx = cx.clone();
                     cx.spawn(async move {
@@ -1151,6 +1199,16 @@ mod tests {
                             ))
                         };
                         say("pong")?;
+                        if ask_late {
+                            // Asks once the test has pressed Stop, and says how it was answered.
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            let tool = acp::ToolCallUpdate::new("tool-1", acp::ToolCallUpdateFields::new());
+                            let options = vec![acp::PermissionOption::new("yes", "Allow", acp::PermissionOptionKind::AllowOnce)];
+                            let request = acp::RequestPermissionRequest::new(session_id.clone(), tool, options);
+                            let answer = task_cx.send_request(request).block_task().await?;
+                            say(if matches!(answer.outcome, acp::RequestPermissionOutcome::Cancelled) { "refused" } else { "asked" })?;
+                            return responder.respond(acp::PromptResponse::new(acp::StopReason::EndTurn));
+                        }
                         if hang {
                             // Holds the responder and ignores session/cancel, like an agent
                             // stuck on a hook, then speaks and asks once the grace is over.
@@ -1215,7 +1273,7 @@ mod tests {
         session: &str,
     ) -> tokio::task::JoinHandle<Result<String, CoreError>> {
         let (hub, session) = (hub.clone(), session.to_owned());
-        tokio::spawn(async move { hub.prompt(session, "ping".into()).await })
+        tokio::spawn(async move { hub.prompt(session, "turn".into(), "ping".into()).await })
     }
 
     async fn permission_request(events: &mut Events) -> (String, String, Vec<PermissionChoice>) {
@@ -1287,7 +1345,7 @@ mod tests {
         );
         let (request_id, _, _) = permission_request(&mut events).await;
 
-        hub.cancel(session.clone());
+        hub.cancel(session.clone(), "turn".into());
         assert_eq!(events.recv().await, Some((session, message("cancelled"))));
         assert_eq!(turn.await.unwrap().unwrap(), "end_turn");
         // Already answered, so this is a no-op.
@@ -1302,20 +1360,20 @@ mod tests {
             .await
             .unwrap();
         let (turn_hub, turn_session) = (hub.clone(), session.clone());
-        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "hang".into()).await });
+        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "turn".into(), "hang".into()).await });
         assert_eq!(
             events.recv().await,
             Some((session.clone(), message("pong")))
         );
 
-        hub.cancel(session.clone());
-        hub.cancel(session.clone());
+        hub.cancel(session.clone(), "turn".into());
+        hub.cancel(session.clone(), "turn".into());
         let stop = tokio::time::timeout(CANCEL_GRACE * 2, turn)
             .await
             .expect("Stop should end the turn after the grace period");
         assert_eq!(stop.unwrap().unwrap(), STOP_UNRESPONSIVE);
         closed_on_the_agent(&session).await;
-        let error = hub.prompt(session.clone(), "ping".into()).await.unwrap_err();
+        let error = hub.prompt(session.clone(), "turn".into(), "ping".into()).await.unwrap_err();
         assert!(error.to_string().contains("session has ended"), "{error}");
 
         // What the old turn sends later doesn't reach the app, and its permission
@@ -1325,20 +1383,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_late_stop_doesnt_cancel_the_next_turn() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Codex, "/tmp".into(), vec![server("http://late-stop")])
+            .await
+            .unwrap();
+        for turn in ["1", "2"] {
+            let (turn_hub, turn_session) = (hub.clone(), session.clone());
+            let prompt = tokio::spawn(async move { turn_hub.prompt(turn_session, turn.into(), "ping".into()).await });
+            // The turn reached the agent.
+            assert_eq!(events.recv().await, Some((session.clone(), message("pong"))));
+            let (request_id, _, _) = permission_request(&mut events).await;
+            hub.respond_permission(request_id, Some("yes".into()));
+            assert_eq!(events.recv().await, Some((session.clone(), message("yes"))));
+            assert_eq!(prompt.await.unwrap().unwrap(), "end_turn");
+            // Stop pressed for turn 1 just as it ended.
+            hub.cancel(session.clone(), "1".into());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_gets_no_new_permission_prompts() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Codex, "/tmp".into(), vec![server("http://asks-late")])
+            .await
+            .unwrap();
+        let (turn_hub, turn_session) = (hub.clone(), session.clone());
+        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "t".into(), "ask after stop".into()).await });
+        assert_eq!(events.recv().await, Some((session.clone(), message("pong"))));
+        hub.cancel(session.clone(), "t".into());
+        // Refused without a PermissionRequest reaching the app.
+        assert_eq!(events.recv().await, Some((session, message("refused"))));
+        assert_eq!(turn.await.unwrap().unwrap(), "end_turn");
+    }
+
+    #[tokio::test]
     async fn a_stop_before_the_turn_starts_still_counts() {
         let (hub, mut events) = fake_hub();
         let session = hub
             .new_session(AgentKind::Codex, "/tmp".into(), vec![server("http://early")])
             .await
             .unwrap();
-        hub.cancel(session.clone());
-        assert_eq!(hub.prompt(session.clone(), "hang".into()).await.unwrap(), "cancelled");
+        hub.cancel(session.clone(), "turn".into());
+        assert_eq!(hub.prompt(session.clone(), "turn".into(), "hang".into()).await.unwrap(), "cancelled");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(events.try_recv().is_err(), "the agent never got the turn");
 
         // The stop was used up: the next turn reaches the agent.
         let (turn_hub, turn_session) = (hub.clone(), session.clone());
-        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "hang".into()).await });
+        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "turn".into(), "hang".into()).await });
         assert_eq!(events.recv().await, Some((session.clone(), message("pong"))));
         hub.close_session(session);
         assert_eq!(turn.await.unwrap().unwrap(), STOP_UNRESPONSIVE);
@@ -1351,7 +1446,7 @@ mod tests {
             .new_session(AgentKind::Codex, "/tmp".into(), vec![])
             .await
             .unwrap();
-        assert!(hub.prompt(session.clone(), "crash".into()).await.is_err());
+        assert!(hub.prompt(session.clone(), "turn".into(), "crash".into()).await.is_err());
         match events.recv().await {
             Some((id, AgentEvent::Disconnected { message })) => {
                 assert_eq!(id, session);
@@ -1359,7 +1454,7 @@ mod tests {
             }
             other => panic!("expected a disconnect, got {other:?}"),
         }
-        let error = hub.prompt(session, "ping".into()).await.unwrap_err();
+        let error = hub.prompt(session, "turn".into(), "ping".into()).await.unwrap_err();
         assert!(error.to_string().contains("session has ended"), "{error}");
         hub.new_session(AgentKind::Codex, "/tmp".into(), vec![])
             .await
@@ -1383,7 +1478,7 @@ mod tests {
             .new_session(AgentKind::Claude, "/tmp".into(), vec![])
             .await
             .unwrap();
-        let error = hub.prompt(session, "signed out".into()).await.unwrap_err();
+        let error = hub.prompt(session, "turn".into(), "signed out".into()).await.unwrap_err();
         assert_eq!(
             error.to_string(),
             "Agent error: Claude isn't signed in. Run `claude` in a terminal, log in, then try again."
@@ -1405,7 +1500,7 @@ mod tests {
             .unwrap();
         let (turn_hub, turn_session) = (hub.clone(), session.clone());
         let turn =
-            tokio::spawn(async move { turn_hub.prompt(turn_session, "own tool".into()).await });
+            tokio::spawn(async move { turn_hub.prompt(turn_session, "turn".into(), "own tool".into()).await });
         assert_eq!(
             events.recv().await,
             Some((session.clone(), message("pong")))
@@ -1424,7 +1519,7 @@ mod tests {
             .unwrap();
         hub.close_session(session.clone());
         closed_on_the_agent(&session).await;
-        let error = hub.prompt(session, "ping".into()).await.unwrap_err();
+        let error = hub.prompt(session, "turn".into(), "ping".into()).await.unwrap_err();
         assert!(error.to_string().contains("session has ended"), "{error}");
     }
 
@@ -1714,7 +1809,7 @@ mod tests {
             .await
             .unwrap();
         let prompt = "Reply with exactly the word: pong. Do not use any tools.";
-        let stop_reason = hub.prompt(session, prompt.into()).await.unwrap();
+        let stop_reason = hub.prompt(session, "turn".into(), prompt.into()).await.unwrap();
 
         let mut chunks = Vec::new();
         while let Ok((_, event)) = events.try_recv() {
@@ -1769,7 +1864,7 @@ mod tests {
             .new_session(kind, repo.to_string_lossy().into(), vec![])
             .await
             .unwrap();
-        let stop = hub.prompt(session, "Reply with exactly: pong".into()).await.unwrap();
+        let stop = hub.prompt(session, "turn".into(), "Reply with exactly: pong".into()).await.unwrap();
         assert_eq!(stop, "end_turn");
         std::path::Path::new(marker).exists()
     }

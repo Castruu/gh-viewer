@@ -167,9 +167,11 @@ impl ReviewHub {
 
     /// Sends a question, with the selected lines and their threads when there's
     /// a selection. Resolves with the stop reason when the agent's turn ends.
+    /// `turn_id` is new for each question; `cancel` takes it to stop this turn.
     pub async fn ask(
         &self,
         session_id: String,
+        turn_id: String,
         selection: Option<Selection>,
         question: String,
     ) -> Result<String, CoreError> {
@@ -186,21 +188,23 @@ impl ReviewHub {
             *turn_head.lock().unwrap() = review.checkout.head_oid.clone();
             build_prompt(&review, !primed, selection.as_ref(), &question)
         };
-        let stop_reason = self.agents.prompt(session_id.clone(), text).await?;
+        let (stop_reason, sent) = self.agents.prompt_turn(session_id.clone(), turn_id, text).await?;
         if stop_reason == STOP_UNRESPONSIVE {
             // The agent closed it; its MCP endpoint must not take drafts from that turn either.
             self.close_agent(session_id);
             return Ok(stop_reason);
         }
-        // Only now: a prompt that failed, e.g. before signing in, never reached the agent.
-        if let Some(info) = self.sessions.lock().unwrap().get_mut(&session_id) {
+        // Only now: a prompt that failed, e.g. before signing in, or was stopped
+        // before it was sent, never reached the agent.
+        if let Some(info) = self.sessions.lock().unwrap().get_mut(&session_id).filter(|_| sent) {
             info.primed = true;
         }
         Ok(stop_reason)
     }
 
-    pub fn cancel(&self, session_id: String) {
-        self.agents.cancel(session_id);
+    /// Stops the turn `ask` was given `turn_id` for; a later turn isn't affected.
+    pub fn cancel(&self, session_id: String, turn_id: String) {
+        self.agents.cancel(session_id, turn_id);
     }
 
     /// Ends a session the app no longer uses, e.g. after Clear Chat: stops its
@@ -885,6 +889,7 @@ mod tests {
         let stop = hub
             .ask(
                 session,
+                "turn".into(),
                 Some(selection),
                 "Use the gh-viewer draft_comment tool to draft exactly one comment on the selected line, with the body `live test`. Use no other tools.".into(),
             )
@@ -929,7 +934,7 @@ mod tests {
         let session = hub.start_agent(kind, repo, number).await.unwrap();
         for question in questions.split('|') {
             let start = std::time::Instant::now();
-            let ask = hub.ask(session.clone(), None, question.into());
+            let ask = hub.ask(session.clone(), question.into(), None, question.into());
             let stop = match tokio::time::timeout(std::time::Duration::from_secs(300), ask).await {
                 Ok(stop) => stop.unwrap(),
                 Err(_) => "no reply in 300 s".into(),

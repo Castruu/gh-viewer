@@ -29,8 +29,11 @@ final class PRReview {
     /// The diff lines the user selected. Questions to the agent include them.
     var selection: Selection?
     var chat = ChatState()
-    /// Set by Stop before the agent's session exists; the question is then dropped instead of sent.
+    /// Set by Stop until the turn ends, which disables the button. Before the
+    /// session exists, the question is then dropped instead of sent.
     private(set) var isCancelPending = false
+    /// Names the running question, so Stop can't reach a later one.
+    @ObservationIgnored private var turnId = ""
     /// Changed by the diff to show the chat and focus its composer (e.g. "Ask about these lines").
     var chatFocusRequest: UUID?
     private(set) var isSubmitting = false
@@ -192,6 +195,8 @@ final class PRReview {
         chat.append(.user(text: question, selection: selection, agent: kind))
         chat.isRunning = true
         isCancelPending = false
+        let turnId = UUID().uuidString
+        self.turnId = turnId
         defer {
             chat.endTurn()
             isCancelPending = false
@@ -205,7 +210,7 @@ final class PRReview {
                 chat.append(.stopped)
                 return
             }
-            let stopReason = try await store.hub.ask(sessionId: sessionId, selection: selection, question: question)
+            let stopReason = try await store.hub.ask(sessionId: sessionId, turnId: turnId, selection: selection, question: question)
             if stopReason == "cancelled" {
                 chat.append(.stopped)
             } else if stopReason == "unresponsive" {
@@ -227,7 +232,7 @@ final class PRReview {
         guard chat.isRunning, !isCancelPending else { return }
         isCancelPending = true
         if let sessionId = chat.runningSession {
-            store.hub.cancel(sessionId: sessionId)
+            store.hub.cancel(sessionId: sessionId, turnId: turnId)
         }
     }
 
