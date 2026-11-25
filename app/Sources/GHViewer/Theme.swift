@@ -18,6 +18,8 @@ struct Palette: Identifiable {
     let pending: Color
     /// Drafts written by an agent, and the chat's agent accents.
     let agent: Color
+    /// Selected diff lines. Kept apart from `removed`, which some accents are close to.
+    let selection: Color
     /// Diff lines: the +/− signs at full strength, row backgrounds as a light tint.
     let added: Color
     let removed: Color
@@ -32,6 +34,7 @@ struct Palette: Identifiable {
         fail: hsb(0.01, light: (0.75, 0.80), dark: (0.62, 1.00)),     // coral
         pending: hsb(0.49, light: (0.80, 0.58), dark: (0.65, 0.92)),  // teal
         agent: hsb(0.57, light: (0.80, 0.75), dark: (0.72, 1.00)),    // sky blue
+        selection: hsb(0.76, light: (0.65, 0.72), dark: (0.55, 1.00)),
         added: hsb(0.40, light: (0.75, 0.55), dark: (0.62, 0.86)),
         removed: hsb(0.01, light: (0.75, 0.80), dark: (0.62, 1.00)),
         // Pastel, because the saturated hues belong to the states.
@@ -46,6 +49,7 @@ struct Palette: Identifiable {
         fail: hex(light: 0xC04A55, dark: 0xE06C75),
         pending: hex(light: 0xA97F1F, dark: 0xEBCB8B),
         agent: hex(light: 0x8A5F86, dark: 0xB48EAD),
+        selection: hex(light: 0x4F6F92, dark: 0x81A1C1),
         added: hex(light: 0x5E7F45, dark: 0xA3BE8C),
         removed: hex(light: 0xC04A55, dark: 0xE06C75),
         repo: { repo in
@@ -64,6 +68,7 @@ struct Palette: Identifiable {
         fail: hex(light: 0xD23A5E, dark: 0xFF6B8B),
         pending: hex(light: 0xB07614, dark: 0xF2B45A),
         agent: hex(light: 0xB07614, dark: 0xF2B45A),
+        selection: hex(light: 0x5B6B86, dark: 0x9AA8C2),
         // Muted, but a diff still has to tell additions from removals.
         added: hsb(0.40, light: (0.45, 0.45), dark: (0.30, 0.80)),
         removed: hsb(0.98, light: (0.50, 0.62), dark: (0.35, 0.92)),
@@ -74,7 +79,7 @@ struct Palette: Identifiable {
     static let vivid = Palette(
         id: "vivid", name: "Vivid",
         accent: .pink, pass: .green, fail: .red, pending: .orange, agent: .purple,
-        added: .green, removed: .red,
+        selection: .blue, added: .green, removed: .red,
         repo: { hsb(Double(stableHash($0) % 360) / 360, light: (0.75, 0.62), dark: (0.65, 0.95)) }
     )
 
