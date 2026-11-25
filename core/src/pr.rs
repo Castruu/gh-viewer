@@ -92,13 +92,16 @@ mutation($input: AddPullRequestReviewInput!) {
 }
 "#;
 
+/// The account gh is signed in as. A submit records it.
+const VIEWER: &str = "query { viewer { id login } }";
+
 /// A review by id with a page of its comments: an earlier submit's, or the one a
 /// submit adds drafts to.
 const REMOTE_REVIEW: &str = r#"
 query($id: ID!, $after: String) {
   node(id: $id) {
     ... on PullRequestReview {
-      state url body commit { oid }
+      state url body viewerDidAuthor commit { oid }
       comments(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes { path line startLine originalLine originalStartLine body diffHunk }
@@ -328,6 +331,9 @@ pub(crate) struct Submission {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SubmitAttempt {
     pub pr_node_id: String,
+    /// The account that submitted. Only it can settle the record.
+    pub viewer_id: String,
+    pub viewer_login: String,
     pub review_id: String,
     pub review_url: String,
     pub commit_oid: String,
@@ -350,12 +356,21 @@ impl GitHubClient {
         submission: Submission,
     ) -> Result<String, CoreError> {
         let mut resume = None;
+        let viewer = self.viewer().await?;
         // An earlier submit is settled first, by what GitHub has of its review now.
         if let Some(record) = store.attempt(repo, number)? {
             if record.pr_node_id != submission.pull_request_id {
                 return Err(CoreError::Storage(format!(
                     "{} is for another pull request. Move it aside to submit here.",
                     store.attempt_path(repo, number)?.display()
+                )));
+            }
+            // Another account can't see that review as its own, or tell a deleted one from a hidden one.
+            if record.viewer_id != viewer.id {
+                return Err(CoreError::Api(format!(
+                    "an earlier submit on this PR was made as {}, but gh is now signed in as {}. \
+                     Switch back with `gh auth switch` to settle it, then submit again.",
+                    record.viewer_login, viewer.login
                 )));
             }
             let remote = self.remote_review(&record.review_id).await.map_err(|error| {
@@ -378,7 +393,7 @@ impl GitHubClient {
                 }
                 (Recovery::Posted, Some(remote)) => {
                     // An earlier try went through as asked; only its answer was lost.
-                    let sent = present(&record.drafts, &remote.comments);
+                    let sent = sent_in(&record, &remote);
                     store
                         .finish_attempt(repo, number, &sent)
                         .map_err(|error| posted_but(&remote.url, error))?;
@@ -386,7 +401,7 @@ impl GitHubClient {
                 }
                 (Recovery::PostedDifferently, Some(remote)) => {
                     // What GitHub posted mustn't stay sendable; the rest stays for a new review.
-                    let sent = present(&record.drafts, &remote.comments);
+                    let sent = sent_in(&record, &remote);
                     store.finish_attempt(repo, number, &sent)?;
                     return Err(CoreError::Api(format!(
                         "an earlier submit was already posted as {} on commit {}: {}. This \
@@ -410,6 +425,8 @@ impl GitHubClient {
         };
         let record = SubmitAttempt {
             pr_node_id: submission.pull_request_id,
+            viewer_id: viewer.id,
+            viewer_login: viewer.login,
             review_id,
             review_url: pending_url,
             commit_oid: submission.commit_oid,
@@ -503,6 +520,18 @@ impl GitHubClient {
         Ok(())
     }
 
+    async fn viewer(&self) -> Result<Account, CoreError> {
+        let (mut data, messages) = split_response(&self.graphql(VIEWER, json!({})).await?)?;
+        let viewer = data
+            .pointer_mut("/viewer")
+            .map(Value::take)
+            .unwrap_or_default();
+        if !messages.is_empty() || viewer.is_null() {
+            return Err(api_error(messages));
+        }
+        serde_json::from_value(viewer).map_err(unexpected)
+    }
+
     /// A review by id with all its comments. `None` only when GitHub says the
     /// node isn't found, which for a review means it was deleted while pending.
     pub(crate) async fn remote_review(
@@ -530,11 +559,18 @@ impl GitHubClient {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct Account {
+    id: String,
+    login: String,
+}
+
 /// A review as GitHub has it now.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RemoteReview {
     /// PENDING until submitted; then COMMENTED, APPROVED, CHANGES_REQUESTED or DISMISSED.
     pub state: String,
+    pub viewer_did_author: bool,
     pub url: String,
     pub body: String,
     /// Empty if GitHub no longer has the commit.
@@ -587,7 +623,8 @@ fn recover(
             .drafts
             .iter()
             .all(|draft| record.drafts.contains(draft));
-    let exact = remote.commit_oid == submission.commit_oid
+    let exact = remote.viewer_did_author
+        && remote.commit_oid == submission.commit_oid
         && posted_event(&remote.state) == Some(submission.event)
         && remote.body.trim() == submission.body.trim()
         && same_drafts
@@ -619,6 +656,14 @@ fn posted_as(state: &str) -> &str {
         "DISMISSED" => "a review that has since been dismissed",
         other => other,
     }
+}
+
+/// The recorded drafts a submitted review holds: yours, if the review is.
+fn sent_in(record: &SubmitAttempt, remote: &RemoteReview) -> Vec<DraftComment> {
+    if !remote.viewer_did_author {
+        return Vec::new();
+    }
+    present(&record.drafts, &remote.comments)
 }
 
 /// Which of `drafts` are still here after the ones GitHub posted were removed.
@@ -662,10 +707,12 @@ fn parse_review_page(body: &str) -> Result<Option<(RemoteReview, Option<String>)
         path: Vec<Value>,
     }
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Node {
         state: String,
         url: String,
         body: String,
+        viewer_did_author: bool,
         commit: Option<CommitOid>,
         comments: Connection<PendingCommentNode>,
     }
@@ -690,6 +737,7 @@ fn parse_review_page(body: &str) -> Result<Option<(RemoteReview, Option<String>)
     Ok(Some((
         RemoteReview {
             state: node.state,
+            viewer_did_author: node.viewer_did_author,
             url: node.url,
             body: node.body,
             commit_oid: node.commit.map(|commit| commit.oid).unwrap_or_default(),
@@ -1857,6 +1905,7 @@ mod tests {
         };
         let remote = RemoteReview {
             state: state.into(),
+            viewer_did_author: true,
             url: "https://github.com/o/r/pull/7#pullrequestreview-9".into(),
             body: "LGTM".into(),
             commit_oid: "abc".into(),
@@ -1967,6 +2016,15 @@ mod tests {
             differently(&|r, _| r.comments.clear()),
             Recovery::PostedDifferently
         );
+        // A review someone else wrote isn't yours, even with the same verdict and text.
+        assert_eq!(
+            differently(&|r, _| r.viewer_did_author = false),
+            Recovery::PostedDifferently
+        );
+        let (record, mut remote, _) = recovery_case("APPROVED");
+        assert_eq!(sent_in(&record, &remote), record.drafts);
+        remote.viewer_did_author = false;
+        assert!(sent_in(&record, &remote).is_empty());
         // Extra comments added on github.com don't change what this submit asked for.
         assert_eq!(
             differently(&|r, _| r.comments.push(pending(
@@ -1984,6 +2042,7 @@ mod tests {
     fn reads_a_review_page_and_only_not_found_as_gone() {
         let page = r#"{ "data": { "node": {
           "state": "PENDING", "url": "https://github.com/o/r/pull/7#pullrequestreview-9", "body": "",
+          "viewerDidAuthor": true,
           "commit": { "oid": "abc" },
           "comments": { "pageInfo": { "hasNextPage": true, "endCursor": "C1" }, "nodes": [
             { "path": "src/pr.rs", "line": 12, "startLine": null, "body": "comment 1",
@@ -2393,6 +2452,8 @@ mod tests {
     fn attempt(drafts: Vec<DraftComment>) -> SubmitAttempt {
         SubmitAttempt {
             pr_node_id: "PR_1".into(),
+            viewer_id: "U_1".into(),
+            viewer_login: "octocat".into(),
             review_id: "PRR_1".into(),
             review_url: "https://github.com/o/r/pull/7#pullrequestreview-9".into(),
             commit_oid: "c0ffee0123456789".into(),
