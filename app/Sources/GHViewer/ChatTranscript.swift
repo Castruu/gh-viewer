@@ -16,7 +16,7 @@ struct ChatTranscript: View {
                 // Not lazy: lazy stacks estimate row heights, which breaks scrolling to the end.
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(chat.items) { item in
-                        ChatItemRow(item: item, isRunning: chat.isRunning, review: review)
+                        ChatItemRow(item: item, isRunning: chat.isRunning, isStopping: review.isCancelPending, review: review)
                     }
                 }
                 .padding(12)
@@ -54,6 +54,8 @@ struct ChatTranscript: View {
 private struct ChatItemRow: View {
     let item: ChatItem
     let isRunning: Bool
+    /// Stop was pressed for the running turn.
+    let isStopping: Bool
     let review: PRReview
 
     var body: some View {
@@ -71,7 +73,7 @@ private struct ChatItemRow: View {
         case .permission(let requestId, let title, let toolTitle, let options, let answer):
             // Unanswered once the turn is over: the core already answered it as cancelled.
             ChatPermissionCard(title: title, toolTitle: toolTitle, options: options, answer: answer,
-                               isOpen: isRunning) { optionId in
+                               isOpen: isRunning && !isStopping, isStopping: isStopping) { optionId in
                 review.respond(toPermission: requestId, optionId: optionId)
             }
         case .notice(let text):
@@ -331,8 +333,9 @@ private struct ChatPermissionCard: View {
     let toolTitle: String?
     let options: [PermissionChoice]
     let answer: String?
-    /// False once the turn is over; nobody is waiting for an answer then.
+    /// False once the turn is over or Stop was pressed; nobody is waiting for an answer then.
     let isOpen: Bool
+    let isStopping: Bool
     let respond: (String?) -> Void
     @Environment(\.palette) private var palette
 
@@ -350,7 +353,7 @@ private struct ChatPermissionCard: View {
             .font(.callout)
             .help(title)
         } else if !isOpen {
-            Label("\(title): not answered", systemImage: "shield.slash")
+            Label("\(title): \(isStopping ? "Stopping…" : "not answered")", systemImage: "shield.slash")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
