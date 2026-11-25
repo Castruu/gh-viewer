@@ -81,7 +81,8 @@ struct DiffList: View {
         if file.file.isBinary {
             DiffNotice(text: "Binary file not shown.")
         } else if file.rows.isEmpty {
-            DiffNotice(text: file.file.status == .renamed ? "File renamed without changes." : "No changes to show.")
+            DiffNotice(text: file.file.status == .renamed ? "File renamed without changes."
+                           : file.file.newMode != nil ? "Only the file mode changed." : "No changes to show.")
         } else {
             let selected = file.rowRange(of: review.selection)
             ForEach(file.rows) { row in
@@ -268,6 +269,12 @@ struct DiffFileHeader: View {
                 .font(.callout)
                 .textSelection(.enabled)
             DiffLineCounts(additions: file.additions, deletions: file.deletions)
+            if let oldMode = file.file.oldMode, let newMode = file.file.newMode {
+                Text(verbatim: "Mode \(oldMode) → \(newMode)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .help("The file's mode changed; 100755 makes it executable")
+            }
             Spacer(minLength: 8)
             if let notes {
                 Button(action: toggleNotes) {

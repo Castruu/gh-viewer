@@ -57,6 +57,10 @@ pub struct DiffFile {
     pub status: FileStatus,
     /// Binary files have no hunks.
     pub is_binary: bool,
+    /// Both set when the change alters the file's mode, e.g. "100644" → "100755"
+    /// to make it executable. A mode-only change has no hunks.
+    pub old_mode: Option<String>,
+    pub new_mode: Option<String>,
     pub hunks: Vec<DiffHunk>,
 }
 
@@ -494,6 +498,8 @@ fn parse_diff(out: &str) -> Vec<DiffFile> {
                 old_path: None,
                 status: FileStatus::Modified,
                 is_binary: false,
+                old_mode: None,
+                new_mode: None,
                 hunks: Vec::new(),
             });
             continue;
@@ -509,6 +515,10 @@ fn parse_diff(out: &str) -> Vec<DiffFile> {
             file.status = FileStatus::Added;
         } else if line.starts_with("deleted file mode ") {
             file.status = FileStatus::Deleted;
+        } else if let Some(mode) = line.strip_prefix("old mode ") {
+            file.old_mode = Some(mode.to_string());
+        } else if let Some(mode) = line.strip_prefix("new mode ") {
+            file.new_mode = Some(mode.to_string());
         } else if let Some(path) = line.strip_prefix("rename from ") {
             file.status = FileStatus::Renamed;
             file.old_path = Some(unquote_path(path));
@@ -872,6 +882,11 @@ index 587be6b..975fbec 100644
             (script.status, script.is_binary, script.hunks.len()),
             (FileStatus::Modified, false, 0)
         );
+        assert_eq!(
+            (script.old_mode.as_deref(), script.new_mode.as_deref()),
+            (Some("100644"), Some("100755"))
+        );
+        assert_eq!(file(&files, "one.txt").new_mode, None);
     }
 
     #[test]

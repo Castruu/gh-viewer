@@ -539,6 +539,8 @@ mod tests {
             old_path: None,
             status: FileStatus::Modified,
             is_binary: false,
+            old_mode: None,
+            new_mode: None,
             hunks: vec![DiffHunk {
                 header: "@@ -10,3 +10,4 @@".into(),
                 old_start: 10,
