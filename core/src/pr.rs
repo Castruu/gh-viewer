@@ -1478,7 +1478,7 @@ fn failed_checks(commits: Option<OptionalNodes<ChecksCommitNode>>) -> Vec<Failed
 }
 
 fn last_reviewed_oid(reviews: Option<OptionalNodes<MyReviewNode>>) -> Option<String> {
-    let mine = reviews?.nodes.into_iter().flatten().filter(|review| review.viewer_did_author).last()?;
+    let mine = reviews?.nodes.into_iter().flatten().rev().find(|review| review.viewer_did_author)?;
     mine.commit.map(|commit| commit.oid)
 }
 
