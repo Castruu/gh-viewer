@@ -432,7 +432,7 @@ impl GitHubClient {
         submission: &Submission,
     ) -> Result<SubmitAttempt, CoreError> {
         check_pending_commit(&review, &submission.commit_oid)?;
-        let new = new_drafts(&submission.drafts, &review.comments);
+        let new = missing_from(&review, &attempt, &submission.drafts);
         self.add_threads(&review.id, &new).await?;
         let mut drafts = attempt.drafts;
         for draft in &submission.drafts {
@@ -552,6 +552,20 @@ fn submit_outcome(response: Result<String, CoreError>) -> Outcome {
         Ok(url) => Outcome::Posted(url),
         Err(error) => Outcome::Unknown(error),
     }
+}
+
+/// The drafts a resumed review still lacks. Ones its attempt recorded, unchanged
+/// since, are in it however many comments it has; only the rest are compared
+/// with its comments, which are read up to the first 100.
+fn missing_from<'a>(
+    review: &PendingReview,
+    attempt: &SubmitAttempt,
+    drafts: &'a [DraftComment],
+) -> Vec<&'a DraftComment> {
+    new_drafts(drafts, &review.comments)
+        .into_iter()
+        .filter(|draft| !attempt.drafts.contains(draft))
+        .collect()
 }
 
 /// What this submission has that an earlier attempt, already posted, didn't send.
@@ -1793,6 +1807,38 @@ mod tests {
             submit_outcome(Ok(r#"{ "data": {} }"#.into())),
             Outcome::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn resumes_with_only_the_drafts_its_review_lacks() {
+        let recorded = draft("1", None);
+        let mut added_before_a_lost_answer = draft("2", None);
+        added_before_a_lost_answer.line = 20;
+        let mut new = draft("3", None);
+        new.line = 30;
+        let earlier = attempt(vec![recorded.clone()]);
+        // Past the first 100 comments, the review lists none of the recorded drafts.
+        let review = PendingReview {
+            id: "PRR_1".into(),
+            commit_oid: "abc".into(),
+            comments: vec![pending(
+                "src/pr.rs",
+                Some(20),
+                None,
+                DiffSide::Right,
+                "comment 2",
+            )],
+        };
+        let drafts = [recorded, added_before_a_lost_answer, new.clone()];
+        assert_eq!(missing_from(&review, &earlier, &drafts), [&new]);
+
+        // A recorded draft edited since is a different one.
+        let mut edited = drafts[0].clone();
+        edited.body = "reworded".into();
+        assert_eq!(
+            missing_from(&review, &earlier, &[edited.clone()]),
+            [&edited]
+        );
     }
 
     #[test]
