@@ -14,7 +14,7 @@ struct DiffFileModel: Identifiable {
     static let largeLineCount = 1500
 
     let file: DiffFile
-    /// Hunk headers and lines in diff order; a row's `id` is its position.
+    /// Hunk headers and lines in diff order.
     let rows: [DiffRow]
     let additions: Int
     let deletions: Int
@@ -27,17 +27,18 @@ struct DiffFileModel: Identifiable {
     var lineCount: Int { positions.count }
     var isLarge: Bool { lineCount > Self.largeLineCount }
 
-    init(_ file: DiffFile) {
+    /// `index` is the file's place in the diff, which keeps its row ids apart from other files'.
+    init(_ file: DiffFile, index: Int) {
         self.file = file
         var rows: [DiffRow] = []
         var positions: [DiffAnchor: Int] = [:]
         var additions = 0, deletions = 0
         var largest: UInt32 = 0
         for hunk in file.hunks {
-            rows.append(DiffRow(id: rows.count, kind: .hunk(hunk.header)))
+            rows.append(DiffRow(id: index << 32 | rows.count, position: rows.count, kind: .hunk(hunk.header)))
             for line in hunk.lines {
                 positions[line.anchor(in: file.path)] = rows.count
-                rows.append(DiffRow(id: rows.count, kind: .line(line)))
+                rows.append(DiffRow(id: index << 32 | rows.count, position: rows.count, kind: .line(line)))
                 switch line.kind {
                 case .added: additions += 1
                 case .removed: deletions += 1
@@ -77,7 +78,10 @@ struct DiffRow: Identifiable, Equatable {
         case line(DiffLine)
     }
 
+    /// Unique in the whole diff: a lazy stack mixes up rows of different sections that share an id.
     let id: Int
+    /// Index in the file's rows, which is diff order.
+    let position: Int
     let kind: Kind
 }
 

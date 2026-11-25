@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The threads, drafts and open editor under one diff line.
@@ -194,6 +195,7 @@ struct DiffCommentEditor: View {
     let cancel: () -> Void
     @State private var text: String
     @FocusState private var isFocused: Bool
+    @State private var escapeMonitor: Any?
 
     init(initialText: String, submitLabel: String, submit: @escaping (String) -> Void, cancel: @escaping () -> Void) {
         self.submitLabel = submitLabel
@@ -219,23 +221,17 @@ struct DiffCommentEditor: View {
                                 .allowsHitTesting(false)
                         }
                     }
-                    .onKeyPress(.escape) {
-                        cancel()
-                        return .handled
-                    }
-                    .onKeyPress(.return, phases: .down) { press in
-                        guard press.modifiers.contains(.command) else { return .ignored }
-                        send()
-                        return .handled
-                    }
                 HStack {
                     Text("⌘↩ to \(submitLabel.lowercased()), Esc to cancel")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
+                    // A shortcut rather than onKeyPress, which the text view swallows. Only while
+                    // this editor has focus, so it doesn't fight the chat composer's.
                     Button("Cancel", action: cancel)
                         .help("Discard this text (Esc)")
                     Button(submitLabel, action: send)
+                        .keyboardShortcut(isFocused ? KeyboardShortcut(.return, modifiers: .command) : nil)
                         .buttonStyle(.borderedProminent)
                         .disabled(trimmed.isEmpty)
                         .help("\(submitLabel) (⌘↩). Stays a local draft until you submit the review")
@@ -244,10 +240,29 @@ struct DiffCommentEditor: View {
             }
         }
         .onAppear { isFocused = true }
+        // NSTextView turns Esc into word completion before SwiftUI sees it, so catch it first.
+        .onChange(of: isFocused, initial: true) { _, focused in
+            if focused, escapeMonitor == nil {
+                escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    guard event.keyCode == 53, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+                    else { return event }
+                    cancel()
+                    return nil
+                }
+            } else if !focused {
+                removeEscapeMonitor()
+            }
+        }
+        .onDisappear(perform: removeEscapeMonitor)
     }
 
     private var trimmed: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func removeEscapeMonitor() {
+        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        escapeMonitor = nil
     }
 
     private func send() {

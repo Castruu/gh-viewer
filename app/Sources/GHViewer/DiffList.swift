@@ -13,7 +13,7 @@ struct DiffList: View {
     /// Where a shift-click extends from: the last plain click, if it's still an end of the selection.
     @State private var anchor: (path: String, row: Int)?
     @State private var shownOutdated: Set<String> = []
-    @FocusState private var isFocused: Bool
+    @State private var escapeMonitor: Any?
 
     var body: some View {
         let annotations = DiffAnnotations(threads: review.opened?.detail.threads ?? [], drafts: review.drafts)
@@ -53,13 +53,19 @@ struct DiffList: View {
                 if let request { proxy.scrollTo(request.path, anchor: .top) }
             }
         }
-        .focusable()
-        .focusEffectDisabled()
-        .focused($isFocused)
-        .onKeyPress(.escape) {
-            guard review.selection != nil else { return .ignored }
-            review.selection = nil
-            return .handled
+        // A monitor rather than onKeyPress, which needs the diff focused and clicks don't focus it.
+        // Esc stays with text fields and editors (chat, composer) and with sheets.
+        .onAppear {
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [review] event in
+                guard event.keyCode == 53, review.selection != nil, event.window?.attachedSheet == nil,
+                      !(event.window?.firstResponder is NSText)
+                else { return event }
+                review.selection = nil
+                return nil
+            }
+        }
+        .onDisappear {
+            if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         }
     }
 
@@ -73,10 +79,10 @@ struct DiffList: View {
             let selected = file.rowRange(of: review.selection)
             ForEach(file.rows) { row in
                 // One view per row, so the lazy stack can count rows without building them.
-                DiffRowView(row: row, numberWidth: file.numberWidth, isSelected: selected?.contains(row.id) ?? false,
-                            actionSelection: selected?.upperBound == row.id && editor == nil ? review.selection : nil,
+                DiffRowView(row: row, numberWidth: file.numberWidth, isSelected: selected?.contains(row.position) ?? false,
+                            actionSelection: selected?.upperBound == row.position && editor == nil ? review.selection : nil,
                             comments: comments(at: row, in: file, annotations: annotations),
-                            review: review, editor: $editor) { select(row.id, in: file) }
+                            review: review, editor: $editor) { select(row.position, in: file) }
                     .equatable()
             }
         }
@@ -95,7 +101,6 @@ struct DiffList: View {
     }
 
     private func select(_ row: Int, in file: DiffFileModel) {
-        isFocused = true
         if NSEvent.modifierFlags.contains(.shift), let current = file.rowRange(of: review.selection) {
             let from = anchor.flatMap { $0.path == file.id && ($0.row == current.lowerBound || $0.row == current.upperBound) ? $0.row : nil }
                 ?? current.lowerBound

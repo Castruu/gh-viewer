@@ -39,7 +39,7 @@ struct DiffPane: View {
             if review.loadState == .idle { await review.load() }
         }
         .onChange(of: review.diffKey, initial: true) { old, new in
-            files = review.opened?.files.map(DiffFileModel.init) ?? []
+            files = (review.opened?.files ?? []).enumerated().map { DiffFileModel($1, index: $0) }
             // Line numbers mean something else on a new diff.
             if old != nil && old != new {
                 review.selection = nil
