@@ -81,8 +81,7 @@ struct PRStatusText: View {
     }
 }
 
-/// A PR in a list: what it does, then where it is, how old, and its state.
-/// Who wrote it and the full title are in the tooltip and in the PR's header.
+/// A PR in a list: its review icon, what it does, then its repo, author and age, and its state in words.
 struct PRRowLabel: View {
     let pullRequest: PullRequest
 
@@ -102,14 +101,16 @@ struct PRRowLabel: View {
                 .font(.caption)
             }
         }
-        .help("\(pullRequest.repo) #\(pullRequest.number) by \(pullRequest.author ?? "ghost"): \(pullRequest.title)")
+        .help(pullRequest.title)
     }
 
-    /// The repo without its owner: the short name is what tells PRs apart.
     private var subtitle: String {
-        "\(pullRequest.repo.split(separator: "/").last ?? "") #\(pullRequest.number) · \(relativeTime(pullRequest.updatedAt, now: Date()))"
-            // The size tells a two-minute review from an afternoon.
-            + " · +\(pullRequest.additions) −\(pullRequest.deletions)"
+        var parts = ["\(pullRequest.repo) #\(pullRequest.number)"]
+        if let author = pullRequest.author {
+            parts.append(author)
+        }
+        parts.append(relativeTime(pullRequest.updatedAt, now: Date()))
+        return parts.joined(separator: " · ")
     }
 }
 

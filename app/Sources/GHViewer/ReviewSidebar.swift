@@ -1,38 +1,18 @@
 import SwiftUI
 
 /// The review window's sidebar: every open PR you're involved in, grouped by what it needs from you.
+/// The open PR's files have their own column, beside the diff.
 struct ReviewSidebar: View {
     @Bindable var model: AppModel
-    let reviews: ReviewStore
     /// The PRs you've already reviewed are the least urgent, so they start folded.
     @State private var collapsed: Set<String> = [SidebarSection.reviewed]
-    @State private var showsFiles = false
     // The filter's checkboxes. What needs your review always shows: that's what the app is for.
     @AppStorage("sidebarShowsYours") private var showsYours = true
     @AppStorage("sidebarShowsReviewed") private var showsReviewed = true
     @AppStorage("sidebarHidesViewedFiles") private var hidesViewedFiles = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            // One list at a time: your pull requests, or the files of the one that's open.
-            HStack(spacing: 6) {
-                Picker("Show", selection: $showsFiles) {
-                    Text("Pull Requests").tag(false)
-                    Text("Files").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(model.selectedPullRequest == nil)
-                filterMenu
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
-            if showsFiles, let pullRequest = model.selectedPullRequest {
-                DiffFileList(review: reviews.review(for: pullRequest), hidesViewed: hidesViewedFiles)
-            } else {
-                pullRequests
-            }
-        }
+        pullRequests
     }
 
     /// Less to read: untick what you don't need to see. The icon fills in while something is hidden.
@@ -86,11 +66,14 @@ struct ReviewSidebar: View {
                                                description: Text("Nothing waiting on you, and nothing of yours open."))
                     }
                 }
-                RefreshStatus(model: model)
-                    .font(.caption)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                HStack {
+                    RefreshStatus(model: model)
+                        .font(.caption)
+                    Spacer()
+                    filterMenu
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
             // A PR picked in the menu bar may sit in a collapsed section.
             .onChange(of: model.selectedPullRequestURL) { _, url in

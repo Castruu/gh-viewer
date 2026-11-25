@@ -18,10 +18,14 @@ struct ReviewWindow: View {
 
     var body: some View {
         NavigationSplitView {
-            ReviewSidebar(model: model, reviews: reviews)
+            ReviewSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 420)
         } detail: {
             PRDetail(model: model, reviews: reviews)
+                // Measured on macOS 26: the column is kept at its minimum plus the sidebar's width, so the
+                // content's own minimum (file tree and diff, about 590) leaves no room for the chat in the
+                // default window and the columns run past its edges. Declaring less makes them fit.
+                .frame(minWidth: 320)
                 // On the detail column, not the split view: there it becomes a third column.
                 // Outside, the split view's content overflowed the window at its default size.
                 .inspector(isPresented: $isChatPresented) {

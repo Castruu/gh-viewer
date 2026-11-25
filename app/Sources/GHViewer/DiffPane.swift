@@ -11,6 +11,9 @@ struct DiffPane: View {
     @State private var expanded: [String: Bool] = [:]
     @State private var editor: DiffEditorTarget?
     @State private var isSubmitPresented = false
+    /// HSplitView can't set a starting width, so the split is drawn here; it's kept across PRs.
+    @AppStorage("diffFileListWidth") private var fileListWidth = 230.0
+    @AppStorage(DiffSummaryBar.showsFilesKey) private var showsFiles = true
     @State private var isConfirmingDiscard = false
     @Environment(\.palette) private var palette
 
@@ -63,6 +66,11 @@ struct DiffPane: View {
         VStack(spacing: 0) {
             banners
             HStack(spacing: 0) {
+                if showsFiles {
+                    DiffFileList(review: review)
+                        .frame(width: fileListWidth)
+                    DiffSplitDivider(width: $fileListWidth, range: 180...480)
+                }
                 VStack(spacing: 0) {
                     DiffSummaryBar(review: review, files: shownFiles, isSubmitPresented: $isSubmitPresented)
                     Divider()
@@ -172,15 +180,50 @@ struct DiffPane: View {
     }
 }
 
+/// A drag handle that resizes the view to its left.
+private struct DiffSplitDivider: View {
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    @State private var startWidth: Double?
+
+    var body: some View {
+        Divider()
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                        .onChanged { drag in
+                            let start = startWidth ?? width
+                            startWidth = start
+                            width = min(max(start + drag.translation.width, range.lowerBound), range.upperBound)
+                        }
+                        .onEnded { _ in startWidth = nil })
+            }
+            .help("Drag to resize the file list")
+    }
+}
+
 /// Above the diff: totals, Reload, and Submit Review with the draft count.
 private struct DiffSummaryBar: View {
+    /// `UserDefaults` key: whether the file tree shows beside the diff.
+    static let showsFilesKey = "showsFileTree"
+
     let review: PRReview
     let files: [DiffFileModel]
     @Binding var isSubmitPresented: Bool
+    @AppStorage(DiffSummaryBar.showsFilesKey) private var showsFiles = true
 
     var body: some View {
         let viewed = review.viewedPaths
         HStack(spacing: 12) {
+            Button("Files", systemImage: "sidebar.left") { showsFiles.toggle() }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .help(showsFiles ? "Hide the file tree" : "Show the file tree")
             Text(countLabel(files.count, "file")).fontWeight(.medium)
             DiffLineCounts(additions: files.reduce(0) { $0 + $1.additions },
                            deletions: files.reduce(0) { $0 + $1.deletions })

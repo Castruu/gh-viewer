@@ -68,7 +68,7 @@ Click one to review it, right-click to open it in your browser.
 
 Each row has the review decision as an icon on the left (approved, changes
 requested, review required, or none yet), then what the PR does, its repo,
-number, age and size. A status in words shows when there is news: Checks failing,
+number, author and age. A status in words shows when there is news: Checks failing,
 Changes requested, Draft, Approved or Checks running.
 
 It refreshes every 2 minutes (every 10 in Low Power Mode), and when you open the
@@ -84,13 +84,12 @@ to pick from for the Dock.
 
 ### A diff that keeps up with you
 
-<img src="docs/assets/screenshots/review-window.png" alt="The review window: PRs grouped by what they need, the diff, and the agent chat">
+<img src="docs/assets/screenshots/review-window.png" alt="The review window: PRs grouped by what they need, the file tree, the diff, and the agent chat">
 
 - The sidebar lists your PRs by what they need: your review, your own, and the
-  ones you've already reviewed. Its second tab shows the open PR's files as a
-  folder tree.
-- The filter button next to the tabs hides the sections, or the viewed files,
-  you don't need to see.
+  ones you've already reviewed. Its filter button hides the sections, or the
+  viewed files, you don't need to see.
+- The open PR's files are a folder tree beside the diff. A button hides it.
 - The window opens on the PR you had open last, or the first one waiting on
   you, and moves to the next one after you submit a review.
 - Hover a diff line for the "+", then click the line to comment on it or ask

@@ -43,8 +43,6 @@ fragment pr on PullRequest {
   isDraft
   updatedAt
   reviewDecision
-  additions
-  deletions
   repository { nameWithOwner }
   author { login }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -141,9 +139,6 @@ pub struct PullRequest {
     /// `None` when the head commit has no checks.
     pub check_state: Option<CheckState>,
     pub updated_at: SystemTime,
-    /// Lines added and removed, to tell a small PR from a big one.
-    pub additions: u32,
-    pub deletions: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -332,10 +327,6 @@ struct PrNode {
     repository: Repository,
     author: Option<Author>,
     commits: Commits,
-    #[serde(default)]
-    additions: u32,
-    #[serde(default)]
-    deletions: u32,
 }
 
 #[derive(Deserialize)]
@@ -448,8 +439,6 @@ fn convert_pr(node: PrNode) -> Result<PullRequest, CoreError> {
         review_decision,
         check_state,
         updated_at,
-        additions: node.additions,
-        deletions: node.deletions,
     })
 }
 
