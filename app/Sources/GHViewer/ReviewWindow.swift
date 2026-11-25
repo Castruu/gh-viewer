@@ -20,10 +20,12 @@ struct ReviewWindow: View {
                 .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         } detail: {
             PRDetail(model: model, reviews: reviews)
-        }
-        .inspector(isPresented: $isChatPresented) {
-            ChatPane(review: model.selectedPullRequest.map(reviews.review(for:)))
-                .inspectorColumnWidth(min: 260, ideal: 320, max: 480)
+                // On the detail column, not the split view: there it becomes a third column.
+                // Outside, the split view's content overflowed the window at its default size.
+                .inspector(isPresented: $isChatPresented) {
+                    ChatPane(review: model.selectedPullRequest.map(reviews.review(for:)))
+                        .inspectorColumnWidth(min: 260, ideal: 320, max: 480)
+                }
         }
         .toolbar {
             ToolbarItem {
