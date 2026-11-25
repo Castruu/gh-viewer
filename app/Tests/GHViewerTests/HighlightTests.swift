@@ -43,7 +43,7 @@ struct HighlightTests {
     @Test func newsIsARequestAReRequestOrChecksThatStartedFailing() {
         func pr(_ number: UInt64, checks: CheckState? = .success) -> PullRequest {
             PullRequest(number: number, title: "T\(number)", url: "u\(number)", repo: "acme/api", author: "dana",
-                        isDraft: false, reviewDecision: nil, checkState: checks, updatedAt: Date())
+                        isDraft: false, reviewDecision: nil, checkState: checks, updatedAt: Date(), additions: 0, deletions: 0)
         }
         func dashboard(authored: [PullRequest] = [], waiting: [PullRequest] = [], reviewed: [PullRequest] = []) -> Dashboard {
             Dashboard(viewerLogin: "me", authored: authored, reviewRequested: waiting, reviewedByMe: reviewed, warnings: [])

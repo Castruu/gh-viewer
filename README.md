@@ -66,12 +66,14 @@ The menu bar shows the PRs that wait on your review (the icon shows how many)
 and your own open PRs, five of each, with a link to the window for the rest.
 Click one to review it, right-click to open it in your browser.
 
-Each row says what the PR does, then its repo, number and age. A status shows
+Each row says what the PR does, then its repo, number, age and size. A status shows
 only when there is news: Checks failing, Changes requested, Draft, Approved or
 Checks running.
 
-It refreshes every 2 minutes, and when you open the menu if the data is more
-than 30 seconds old. **⌘R** refreshes now.
+It refreshes every 2 minutes (every 10 in Low Power Mode), and when you open the
+menu if the data is more than 30 seconds old. **⌘R** refreshes now. A notification
+tells you about a new review request, a re-request, and checks that start failing
+on your own PR; Settings turns that off.
 
 Colors follow the theme you pick in Settings (**⌘,** with the review window open):
 Cool, Soft, Focus or Vivid, in light or dark. Settings also has four app icons
@@ -92,7 +94,16 @@ to pick from for the Dock.
   you, and moves to the next one after you submit a review.
 - Hover a diff line for the "+", then click the line to comment on it or ask
   the agent about it.
-- A unified diff computed from a local checkout, not fetched from GitHub's API.
+- The PR's description sits under its title, one line until you open it. Failing
+  checks are named there, each a link to its run.
+- A unified diff computed from a local checkout, not fetched from GitHub's API,
+  with basic syntax colors. An edited line marks the part that changed.
+- Lock, generated and long data files start folded.
+- After you've reviewed a PR, "Since Your Review" narrows it to the files that
+  changed since.
+- The Review menu steps through a review from the keyboard: next and previous
+  file (**⌥⌘↓**, **⌥⌘↑**), mark viewed (**⌥⌘V**), comment (**⌥⌘C**), ask the agent
+  (**⌥⌘A**), submit (**⇧⌘↩**).
 - "Viewed" checkboxes sync with GitHub. Viewed and very large files start collapsed.
 - Review threads from GitHub, placed on the lines they're about.
 - The agent chat sits beside the diff. Close it from the toolbar and it stays closed.
@@ -112,7 +123,8 @@ to pick from for the Dock.
 
 <img src="docs/assets/screenshots/submit.png" width="420" align="right" alt="The Submit Review sheet, listing the draft Claude wrote">
 
-- Select lines to draft a comment yourself, or let the agent draft them.
+- Select lines to draft a comment yourself, or let the agent draft them. The agent
+  writes replacement code as a GitHub suggestion the author can apply in one click.
 - Drafts are saved locally until you submit. Edit or delete any of them.
 - Submit them as one review: comment, approve or request changes.
 - Agent drafts are labeled as such, here and in the diff, so you check them

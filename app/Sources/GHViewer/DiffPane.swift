@@ -55,19 +55,23 @@ struct DiffPane: View {
             submit: { if review.opened != nil { isSubmitPresented = true } }))
     }
 
+    private var shownFiles: [DiffFileModel] {
+        review.shown(files, path: \.id)
+    }
+
     private var loaded: some View {
         VStack(spacing: 0) {
             banners
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    DiffSummaryBar(review: review, files: files, isSubmitPresented: $isSubmitPresented)
+                    DiffSummaryBar(review: review, files: shownFiles, isSubmitPresented: $isSubmitPresented)
                     Divider()
-                    if files.isEmpty {
+                    if shownFiles.isEmpty {
                         ContentUnavailableView("No Changes", systemImage: "checkmark.circle",
                                                description: Text("This pull request doesn't change any files."))
                             .frame(maxHeight: .infinity)
                     } else {
-                        DiffList(review: review, files: files, expanded: $expanded, editor: $editor,
+                        DiffList(review: review, files: shownFiles, expanded: $expanded, editor: $editor,
                                  scrollRequest: review.scrollRequest) { setViewed($0, $1) }
                     }
                 }
@@ -132,7 +136,7 @@ struct DiffPane: View {
 
     /// Moves the diff to the file after or before the current one: the one the tree or this last went to.
     private func goToFile(by step: Int) {
-        let paths = files.map(\.id)
+        let paths = shownFiles.map(\.id)
         if let path = Self.path(after: review.scrollRequest?.path, by: step, in: paths) {
             review.scrollRequest = DiffScrollRequest(path: path)
         }
@@ -182,6 +186,16 @@ private struct DiffSummaryBar: View {
                            deletions: files.reduce(0) { $0 + $1.deletions })
             Text("\(files.filter { viewed.contains($0.id) }.count) of \(files.count) viewed")
                 .foregroundStyle(.secondary)
+            if let changed = review.opened?.changedSinceReview {
+                if changed.isEmpty {
+                    Text("Nothing new since your review")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Toggle("Since Your Review", isOn: Binding { review.showsOnlyChangedSinceReview } set: { review.showsOnlyChangedSinceReview = $0 })
+                        .toggleStyle(.button)
+                        .help("Show only the files that changed since the last review you submitted")
+                }
+            }
             Spacer()
             Button {
                 Task { await review.load() }

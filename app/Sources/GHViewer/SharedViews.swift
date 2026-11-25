@@ -70,6 +70,8 @@ struct PRRowLabel: View {
     /// The repo without its owner: the short name is what tells PRs apart.
     private var subtitle: String {
         "\(pullRequest.repo.split(separator: "/").last ?? "") #\(pullRequest.number) · \(relativeTime(pullRequest.updatedAt, now: Date()))"
+            // The size tells a two-minute review from an afternoon.
+            + " · +\(pullRequest.additions) −\(pullRequest.deletions)"
     }
 }
 

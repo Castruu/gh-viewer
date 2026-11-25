@@ -310,6 +310,21 @@ impl CheckoutManager {
         })
     }
 
+    /// The paths that differ between `since` and the checked-out head. `None` when `since`
+    /// can't be read, e.g. a force push dropped it. After a rebase it also lists what
+    /// came in from the base branch.
+    pub(crate) async fn changed_since(&self, checkout: &Checkout, since: &str) -> Option<Vec<String>> {
+        let bare = self.paths(&checkout.repo, checkout.number).ok()?.bare;
+        if !is_oid(since) || !is_oid(&checkout.head_oid) {
+            return None;
+        }
+        // Names only, without rename detection: trees are enough, so no blobs are fetched.
+        let out = git(&["-C", &bare, "diff", "--name-only", "--no-renames", "-z", since, &checkout.head_oid])
+            .await
+            .ok()?;
+        Some(out.split('\0').filter(|path| !path.is_empty()).map(String::from).collect())
+    }
+
     /// The PR's diff, merge base → head, matching GitHub's "Files changed".
     pub async fn diff(&self, checkout: Checkout) -> Result<Vec<DiffFile>, CoreError> {
         let bare = self.paths(&checkout.repo, checkout.number)?.bare;
