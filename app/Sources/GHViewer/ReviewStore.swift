@@ -9,12 +9,14 @@ final class ReviewStore {
 
     let github = GitHubClient()
     let drafts: DraftStore
+    let chats: ChatArchive
     let hub: ReviewHub
     private let listener = CoreListener()
 
     init() {
         let root = Self.dataDirectory().path
         drafts = DraftStore(root: root)
+        chats = ChatArchive(root: Self.dataDirectory().appending(path: "chats", directoryHint: .isDirectory))
         hub = ReviewHub(root: root, github: github, drafts: drafts, listener: listener)
         drafts.setListener(listener: listener)
         listener.store = self
@@ -41,7 +43,7 @@ final class ReviewStore {
             .reloadDrafts()
     }
 
-    /// ~/Library/Application Support/GHViewer: clones, worktrees and drafts.
+    /// ~/Library/Application Support/GHViewer: clones, worktrees, drafts and chats.
     private static func dataDirectory() -> URL {
         URL.applicationSupportDirectory.appending(path: "GHViewer", directoryHint: .isDirectory)
     }

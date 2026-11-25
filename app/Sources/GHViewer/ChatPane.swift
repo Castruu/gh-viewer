@@ -39,9 +39,10 @@ private struct ChatConversation: View {
     }
 }
 
-/// The agent picker and what the agent is doing.
+/// The agent picker, what the agent is doing, and Clear Chat.
 private struct ChatHeader: View {
     @Bindable var review: PRReview
+    @State private var isConfirmingClear = false
     @Environment(\.palette) private var palette
 
     var body: some View {
@@ -62,17 +63,49 @@ private struct ChatHeader: View {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
-                    Text(chat.isStarting ? "Starting \(chat.agent.displayName)…" : "Working…")
-                        .lineLimit(1)
+                    if review.isCancelPending {
+                        Text("Stopping…")
+                    } else if chat.isStarting {
+                        ChatStartingText(agent: chat.agent)
+                    } else {
+                        Text("Working…")
+                    }
                 }
+                .lineLimit(1)
                 .font(.callout)
                 .foregroundStyle(palette.agent)
                 .help(chat.isStarting ? "The first start downloads the agent and can take a minute"
                                       : "The agent is working on your question")
+            } else {
+                Button("Clear Chat", systemImage: "trash") {
+                    isConfirmingClear = true
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .disabled(chat.items.isEmpty)
+                .help("Clear Chat")
+                .confirmationDialog("Clear this chat?", isPresented: $isConfirmingClear) {
+                    Button("Clear Chat", role: .destructive, action: review.clearChat)
+                } message: {
+                    Text("The conversation is deleted, and the next question starts a new session.")
+                }
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+}
+
+/// "Starting Claude…", with the seconds once it takes a while.
+private struct ChatStartingText: View {
+    let agent: AgentKind
+    @State private var start = Date.now
+
+    var body: some View {
+        TimelineView(.periodic(from: start, by: 1)) { context in
+            let seconds = Int(context.date.timeIntervalSince(start))
+            Text(seconds < 5 ? "Starting \(agent.displayName)…" : "Starting \(agent.displayName)… \(seconds) s")
+        }
     }
 }
 
@@ -150,8 +183,7 @@ private struct ChatComposer: View {
                 if chat.isRunning {
                     Button("Stop", systemImage: "stop.circle.fill", action: review.cancel)
                         .keyboardShortcut(".", modifiers: .command)
-                        // The session doesn't exist yet, so there's nothing to cancel.
-                        .disabled(chat.isStarting)
+                        .disabled(review.isCancelPending)
                         .help("Stop the agent (⌘.)")
                 } else {
                     Button("Send", systemImage: "arrow.up.circle.fill", action: send)

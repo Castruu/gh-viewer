@@ -20,6 +20,17 @@ struct ChatState {
         items.append(ChatItem(kind: kind))
     }
 
+    /// Puts back a saved transcript, e.g. after a restart.
+    mutating func restore(_ saved: [ChatItem]) {
+        items = saved
+    }
+
+    /// Empties the transcript and forgets the sessions, so the next question starts a fresh one.
+    mutating func clear() {
+        items = []
+        sessions = [:]
+    }
+
     mutating func apply(_ event: AgentEvent, sessionId: String) {
         switch event {
         case .messageChunk(let text):
@@ -91,8 +102,12 @@ struct ChatItem: Identifiable {
         /// `toolTitle` is the title of the tool call it asks about, when known.
         /// `answer` is the chosen option's name once answered.
         case permission(requestId: String, title: String, toolTitle: String?, options: [PermissionChoice], answer: String?)
-        /// Errors, stops and disconnects.
+        /// Errors and disconnects.
         case notice(String)
+        /// Informational, e.g. where a restored conversation ends.
+        case info(String)
+        /// You stopped the turn.
+        case stopped
     }
 
     let id = UUID()
@@ -116,5 +131,10 @@ struct ChatItem: Identifiable {
 
     var isUser: Bool {
         if case .user = kind { true } else { false }
+    }
+
+    /// The agent a question went to.
+    var userAgent: AgentKind? {
+        if case .user(_, _, let agent) = kind { agent } else { nil }
     }
 }

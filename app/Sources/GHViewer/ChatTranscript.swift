@@ -75,7 +75,11 @@ private struct ChatItemRow: View {
                 review.respond(toPermission: requestId, optionId: optionId)
             }
         case .notice(let text):
-            ChatNotice(text: text, isError: item.isErrorNotice)
+            ChatNotice(text: text, isError: true)
+        case .info(let text):
+            ChatNotice(text: text, isError: false)
+        case .stopped:
+            ChatNotice(text: "Stopped.", isError: false)
         }
     }
 }

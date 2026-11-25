@@ -27,6 +27,8 @@ final class PRReview {
     /// The diff lines the user selected. Questions to the agent include them.
     var selection: Selection?
     var chat = ChatState()
+    /// Set by Stop before the agent's session exists; the question is then dropped instead of sent.
+    private(set) var isCancelPending = false
     /// Changed by the diff to show the chat and focus its composer (e.g. "Ask about these lines").
     var chatFocusRequest: UUID?
     private(set) var isSubmitting = false
@@ -39,6 +41,7 @@ final class PRReview {
         url = pullRequest.url
         self.store = store
         reloadDrafts()
+        restoreChat()
     }
 
     /// True while drafts hold the diff on an older commit than the PR's latest push.
@@ -170,22 +173,40 @@ final class PRReview {
         guard !question.isEmpty, !chat.isRunning else { return }
         let selection = withSelection ? self.selection : nil
         let kind = chat.agent
+        if let previous = chat.items.last(where: \.isUser)?.userAgent, previous != kind {
+            chat.append(.info("\(kind.displayName) hasn't seen the answers above."))
+        }
         chat.append(.user(text: question, selection: selection, agent: kind))
         chat.isRunning = true
-        defer { chat.isRunning = false }
+        isCancelPending = false
+        defer {
+            chat.isRunning = false
+            isCancelPending = false
+            saveChat()
+        }
         do {
             let sessionId = try await session(for: kind)
+            if isCancelPending {
+                chat.append(.stopped)
+                return
+            }
             let stopReason = try await store.hub.ask(sessionId: sessionId, selection: selection, question: question)
-            if stopReason != "end_turn" {
-                chat.append(.notice(stopReason == "cancelled" ? "Stopped." : "The agent stopped: \(stopReason)."))
+            if stopReason == "cancelled" {
+                chat.append(.stopped)
+            } else if stopReason != "end_turn" {
+                chat.append(.notice("The agent stopped: \(stopReason)."))
             }
         } catch {
             chat.append(.notice(error.coreMessage))
         }
     }
 
+    /// Stops the turn. Before the session exists, the question is dropped once it does.
     func cancel() {
-        guard let sessionId = chat.sessions[chat.agent] else { return }
+        guard let sessionId = chat.sessions[chat.agent] else {
+            isCancelPending = chat.isRunning
+            return
+        }
         store.hub.cancel(sessionId: sessionId)
     }
 
@@ -193,6 +214,39 @@ final class PRReview {
     func respond(toPermission requestId: String, optionId: String?) {
         store.hub.respondPermission(requestId: requestId, optionId: optionId)
         chat.resolvePermission(requestId, optionId: optionId)
+        saveChat()
+    }
+
+    /// Deletes the saved transcript and empties the chat. The next question starts a fresh session.
+    func clearChat() {
+        guard !chat.isRunning else { return }
+        chat.clear()
+        do {
+            try store.chats.delete(repo: repo, number: number)
+        } catch {
+            actionError = error.coreMessage
+        }
+    }
+
+    private func saveChat() {
+        do {
+            try store.chats.save(chat.items, repo: repo, number: number)
+        } catch {
+            actionError = error.coreMessage
+        }
+    }
+
+    /// Shows the transcript saved before a restart, and where the new session starts.
+    private func restoreChat() {
+        do {
+            guard let saved = try store.chats.load(repo: repo, number: number) else { return }
+            chat.restore(saved.items)
+            chat.agent = saved.items.last(where: \.isUser)?.userAgent ?? chat.agent
+            let date = saved.savedAt.formatted(date: .abbreviated, time: .shortened)
+            chat.append(.info("Conversation from \(date). \(chat.agent.displayName) starts a new session from here and doesn't remember it."))
+        } catch {
+            chat.append(.notice(error.coreMessage))
+        }
     }
 
     private func session(for kind: AgentKind) async throws -> String {
