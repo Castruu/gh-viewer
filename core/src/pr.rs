@@ -1536,7 +1536,7 @@ fn write_file(path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
     match json {
         Some(json) => {
             let tmp = path.with_extension("json.tmp");
-            fs::create_dir_all(dir).map_err(storage)?;
+            create_dirs(dir).map_err(storage)?;
             let mut file = fs::File::create(&tmp).map_err(storage)?;
             file.write_all(&json)
                 .and_then(|()| file.sync_all())
@@ -1552,6 +1552,24 @@ fn write_file(path: &Path, json: Option<Vec<u8>>) -> Result<(), CoreError> {
     fs::File::open(dir)
         .and_then(|dir| dir.sync_all())
         .map_err(storage)
+}
+
+/// Makes `dir` and any missing parents, syncing the parent of each one it makes,
+/// so a new path to the file survives a power loss too.
+fn create_dirs(dir: &Path) -> io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    let parent = dir
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no parent directory"))?;
+    create_dirs(parent)?;
+    if let Err(e) = fs::create_dir(dir)
+        && e.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(e);
+    }
+    fs::File::open(parent)?.sync_all()
 }
 
 fn position(drafts: &[DraftComment], id: &str) -> Result<usize, CoreError> {
@@ -2568,6 +2586,18 @@ mod tests {
         store.clear("o/r".into(), 7).unwrap();
         assert_eq!(store.attempt("o/r", 7).unwrap(), None);
         assert!(!draft_file(&dir).exists());
+    }
+
+    #[test]
+    fn makes_missing_directories_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("drafts/owner/name");
+        create_dirs(&deep).unwrap();
+        assert!(deep.is_dir());
+        // Already there is fine, and a file in the way isn't.
+        create_dirs(&deep).unwrap();
+        fs::write(dir.path().join("file"), "x").unwrap();
+        assert!(create_dirs(&dir.path().join("file/below")).is_err());
     }
 
     #[test]
