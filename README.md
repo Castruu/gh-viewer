@@ -19,8 +19,10 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
   <a href="#privacy-and-safety">Privacy</a> ·
+  <a href="#keyboard-shortcuts">Shortcuts</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="#development">Development</a>
+  <a href="#development">Development</a> ·
+  <a href="#contributing">Contributing</a>
 </p>
 
 <p align="center">
@@ -136,6 +138,23 @@ to pick from for the Dock.
 
 <br clear="right">
 
+## Keyboard shortcuts
+
+| Where | Keys | What it does |
+|---|---|---|
+| Menu | **⌘O** | Open the review window |
+| Menu and window | **⌘R** | Refresh your pull requests |
+| Window | **⌘,** | Settings: colors, appearance, notifications, app icon |
+| Review menu | **⌥⌘↓** / **⌥⌘↑** | Next / previous file |
+| Review menu | **⌥⌘V** | Mark the current file as viewed and move on |
+| Review menu | **⌥⌘C** | Comment on the selected lines |
+| Review menu | **⌥⌘A** | Ask the agent about the selected lines |
+| Review menu | **⇧⌘↩** | Submit review |
+| Review menu | **⇧⌘F** | Show or hide the file tree |
+| Diff | click, **⇧**-click, **Esc** | Select a line, extend the selection, clear it |
+| Chat | **↩**, **⌥↩**, **⌘.** | Send, new line, stop the agent |
+| Comment editor | **⌘↩** | Save the comment |
+
 ## Privacy and safety
 
 - **No token storage.** GH Viewer reads your token from `gh auth token` on each
@@ -154,6 +173,14 @@ to pick from for the Dock.
   on and the next one waiting on your review, which clones their repos the first
   time. In Low Power Mode it skips the one ahead. At most six PRs keep their diff
   in memory.
+
+## What it doesn't do yet
+
+- GitHub Enterprise: it talks to github.com only.
+- Signed releases: you build it yourself, and the build runs on the Mac that made it.
+- Replying to or resolving review threads. You read them in the app and answer on GitHub.
+- A split, side-by-side diff. The diff is unified.
+- Full syntax highlighting. Colors come from a simple line-by-line scanner.
 
 ## How it works
 
@@ -246,6 +273,37 @@ SwiftPM's search paths, so pass them to `swift test`:
 T=/Library/Developer/CommandLineTools/Library/Developer
 swift test --package-path app -Xswiftc -F$T/Frameworks \
     -Xlinker -rpath -Xlinker $T/Frameworks -Xlinker -rpath -Xlinker $T/usr/lib
+```
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+- **Found a bug?** Open an issue with your macOS version, what you did, what you
+  expected and what happened. A screenshot helps for anything visual.
+- **Found a security problem?** Please don't open a public issue. Reach the
+  maintainer through their GitHub profile first.
+- **Want to change something?** For anything bigger than a fix, open an issue
+  first so the direction is agreed before you build it. `docs/design.md` has the
+  decisions made so far and the reasons for them.
+
+For a pull request:
+
+1. Build with `scripts/build.sh` and run both test suites (see [Tests](#tests)).
+2. Keep the split the project uses: GitHub, git and agent logic in `core/`
+   (Rust), views and small state objects in `app/` (Swift).
+3. For a change you can see, add before and after screenshots. Use made-up
+   pull requests, not your own queue.
+4. Say what you tested by hand and what you couldn't.
+
+## Uninstall
+
+Quit GH Viewer, then:
+
+```sh
+rm -rf /Applications/GHViewer.app
+rm -rf ~/Library/Application\ Support/GHViewer   # clones, worktrees, drafts, chats
+defaults delete io.github.castruu.GHViewer        # settings
 ```
 
 ## License
