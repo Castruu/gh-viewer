@@ -272,8 +272,8 @@ impl GitHubClient {
     }
 
     /// Submits a review with the drafts as comments; returns the review's URL.
-    /// If you have a pending review on github.com, the drafts are added to it
-    /// and it's submitted, so its comments go out too.
+    /// If you have a pending review on github.com, it must be on `commit_oid`:
+    /// the drafts are added to it and it's submitted, so its comments go out too.
     pub async fn submit_review(
         &self,
         pull_request_id: String,
@@ -296,15 +296,8 @@ impl GitHubClient {
             return review_url(&data, "/addPullRequestReview/pullRequestReview/url");
         };
 
+        check_pending_commit(&pending, &commit_oid)?;
         let new = new_drafts(&comments, &pending.comments);
-        if !new.is_empty() && pending.commit_oid != commit_oid {
-            return Err(CoreError::Api(format!(
-                "your pending review on github.com is on commit {}, but these drafts are on {}. \
-                 Submit or cancel it on github.com, then try again.",
-                short_oid(&pending.commit_oid),
-                short_oid(&commit_oid)
-            )));
-        }
         // Retrying after a failure is safe: drafts already in the pending review are skipped above.
         let partial = |added: usize, error: CoreError| {
             CoreError::Api(format!(
@@ -398,6 +391,20 @@ fn submit_pending_variables(pending_review_id: &str, event: ReviewEvent, body: &
     json!({ "input": {
         "pullRequestReviewId": pending_review_id, "event": event_name(event), "body": body,
     } })
+}
+
+/// A pending review is submitted on the commit it was started on, so for any
+/// verdict, even an approval with no new comments, that must be the one under review.
+fn check_pending_commit(pending: &PendingReview, commit_oid: &str) -> Result<(), CoreError> {
+    if pending.commit_oid == commit_oid {
+        return Ok(());
+    }
+    Err(CoreError::Api(format!(
+        "your pending review on github.com is on commit {}, but you're reviewing {}. \
+         Submit or cancel it on github.com, then try again.",
+        short_oid(&pending.commit_oid),
+        short_oid(commit_oid)
+    )))
 }
 
 /// Drafts not already in the pending review, so a retry doesn't post them twice.
@@ -1377,6 +1384,24 @@ mod tests {
             .collect();
         assert_eq!(ids, ["edited", "moved"]);
         assert_eq!(new_drafts(&drafts, &[]).len(), 5);
+    }
+
+    #[test]
+    fn refuses_a_pending_review_on_another_commit() {
+        let pending = |commit: &str| PendingReview {
+            id: "PRR_1".into(),
+            commit_oid: commit.into(),
+            comments: vec![],
+        };
+        let head = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
+        assert!(check_pending_commit(&pending(head), head).is_ok());
+        let message = check_pending_commit(&pending("1234567890abcdef"), head)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("on commit 1234567") && message.contains("reviewing 6dcb09b"),
+            "{message}"
+        );
     }
 
     #[test]
