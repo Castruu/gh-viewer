@@ -21,6 +21,11 @@ struct DiffMarkdown: View {
         .textSelection(.enabled)
     }
 
+    /// A comment's first line as plain text, for one-line summaries.
+    static func firstLine(of text: String) -> String {
+        String(inline(text.split(separator: "\n").first.map(String.init) ?? "").characters)
+    }
+
     static func inline(_ text: String) -> AttributedString {
         let text = text.replacing(htmlTag, with: "").trimmingCharacters(in: .whitespaces)
         return (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))

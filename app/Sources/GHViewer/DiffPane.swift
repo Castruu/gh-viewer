@@ -91,7 +91,7 @@ struct DiffPane: View {
                 Button {
                     review.actionError = nil
                 } label: {
-                    Image(systemName: "xmark")
+                    Label("Dismiss", systemImage: "xmark").labelStyle(.iconOnly)
                 }
                 .buttonStyle(.borderless)
                 .help("Dismiss")
@@ -249,7 +249,7 @@ private struct SubmitConfirmation: View {
                     .help("Open the review on GitHub")
             }
             Button(action: dismiss) {
-                Image(systemName: "xmark")
+                Label("Dismiss", systemImage: "xmark").labelStyle(.iconOnly)
             }
             .buttonStyle(.borderless)
             .help("Dismiss")

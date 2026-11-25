@@ -100,9 +100,7 @@ struct DiffThreadView: View {
 
     private var summary: String {
         let first = thread.comments.first
-        // Plain text of the first line, without markdown or HTML.
-        let line = first?.body.split(separator: "\n").first.map(String.init) ?? ""
-        let body = String(DiffMarkdown.inline(line).characters).trimmingCharacters(in: .whitespaces)
+        let body = DiffMarkdown.firstLine(of: first?.body ?? "")
         let replies = thread.comments.count > 1 ? " · \(countLabel(thread.comments.count - 1, "reply"))" : ""
         return "Resolved · \(first?.author ?? "ghost"): \(body)\(replies)"
     }

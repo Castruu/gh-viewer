@@ -131,9 +131,15 @@ private struct SubmitDraftSummary: View {
         }
     }
 
+    /// "L7", "L7–9", or "old L7" for a removed line, as GitHub numbers the left side.
+    private func lines(_ draft: DraftComment) -> String {
+        let range = draft.startLine.map { $0 == draft.line ? "L\(draft.line)" : "L\($0)–\(draft.line)" } ?? "L\(draft.line)"
+        return draft.side == .left ? "old \(range)" : range
+    }
+
     private func row(_ draft: DraftComment) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(verbatim: draft.startLine.map { $0 == draft.line ? "L\(draft.line)" : "L\($0)–\(draft.line)" } ?? "L\(draft.line)")
+            Text(verbatim: lines(draft))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 52, alignment: .leading)
@@ -142,7 +148,7 @@ private struct SubmitDraftSummary: View {
                     .foregroundStyle(palette.agent)
                     .help("Drafted by \(name)")
             }
-            Text(verbatim: draft.body.split(separator: "\n").first.map(String.init) ?? "")
+            Text(verbatim: DiffMarkdown.firstLine(of: draft.body))
                 .lineLimit(1)
         }
     }
