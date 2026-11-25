@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, own_mcp_server_name};
-use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable};
+use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable, remove_agent_config};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
 use crate::pr::{DraftAuthor, DraftStore, NewDraft, Prepared, PullRequestDetail, ReviewEvent, ReviewThread};
 use crate::{CoreError, DiffSide, GitHubClient};
@@ -136,6 +136,11 @@ impl ReviewHub {
             turn_head: turn_head.clone(),
         }));
         let worktree = review.read().unwrap().checkout.worktree_path.clone();
+        // An earlier session may have written config there that this one would load.
+        if let Err(error) = remove_agent_config(&worktree) {
+            mcp.unregister(&endpoint);
+            return Err(error);
+        }
         let server = McpServerHttp {
             name: own_mcp_server_name(),
             url: endpoint.url.clone(),

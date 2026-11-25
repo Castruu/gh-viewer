@@ -379,12 +379,40 @@ impl CheckoutManager {
 /// hooks, MCP servers and permissions that the PR's author would run on this
 /// machine. The diff is between commits, so it still shows them.
 pub(crate) async fn hide_agent_config(wt: &str) -> Result<String, String> {
+    // The same names as AGENT_CONFIG.
     // No trailing slash: a PR's `.codex` may be a symlink or a file, not only a directory.
     git(&[
         "-C", wt, "sparse-checkout", "set", "--no-cone",
         "/*", "!/.claude", "!/.codex", "!/.mcp.json",
     ])
     .await
+}
+
+/// What agents read as config from the root of their cwd.
+const AGENT_CONFIG: [&str; 3] = [".claude", ".codex", ".mcp.json"];
+
+/// Removes agent config from the root of the worktree `wt`, whatever its type.
+/// The sparse checkout only governs tracked files, so this catches config an
+/// agent wrote. Symlinks are removed, not followed. Fails if any is left.
+pub(crate) fn remove_agent_config(wt: &str) -> Result<(), CoreError> {
+    for name in AGENT_CONFIG {
+        let path = Path::new(wt).join(name);
+        let removed = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+        let gone = matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        if !gone {
+            let reason = removed.err().map(|e| format!(" ({e})")).unwrap_or_default();
+            return Err(CoreError::Agent(format!(
+                "Couldn't remove `{name}` from the PR's worktree{reason}. An agent would load it as its own config. Delete {}, then try again.",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_oid(oid: &str) -> bool {
@@ -1097,6 +1125,37 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
                 assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
             }
         }
+    }
+
+    #[test]
+    fn removes_agent_config_an_agent_wrote() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (wt, outside) = (tmp.path().join("wt"), tmp.path().join("outside"));
+        for dir in [wt.join(".claude/hooks"), wt.join("src/.claude"), outside.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(wt.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(wt.join(".mcp.json"), "{}").unwrap();
+        std::fs::write(outside.join("config.toml"), "").unwrap();
+        std::os::unix::fs::symlink(&outside, wt.join(".codex")).unwrap();
+        let wt_str = wt.to_str().unwrap();
+
+        remove_agent_config(wt_str).unwrap();
+        for name in AGENT_CONFIG {
+            assert!(std::fs::symlink_metadata(wt.join(name)).is_err(), "{name}");
+        }
+        // The link went, not what it pointed to; nested dirs aren't config.
+        assert!(outside.join("config.toml").exists());
+        assert!(wt.join("src/.claude").is_dir());
+        remove_agent_config(wt_str).unwrap();
+
+        // What can't be removed fails the start.
+        std::fs::write(wt.join(".mcp.json"), "{}").unwrap();
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let error = remove_agent_config(wt_str).unwrap_err();
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(error.to_string().contains("Couldn't remove `.mcp.json`"), "{error}");
     }
 
     #[tokio::test]
