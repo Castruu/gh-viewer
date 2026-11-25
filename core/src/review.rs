@@ -263,10 +263,9 @@ impl ReviewHub {
         // A draft made meanwhile, e.g. by an agent on the diff still shown, pins the
         // PR to that commit; then it's loaded once more on that commit.
         for _ in 0..2 {
-            *prepared = true;
             let checkout = self
                 .checkouts
-                .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin.clone())
+                .prepare_noting(repo.clone(), number, detail.base_ref_name.clone(), pin.clone(), prepared)
                 .await?;
             // A push between the two reads leaves thread positions on another commit.
             // If it persists, the diff lists threads by file instead of inline.

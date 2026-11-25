@@ -123,6 +123,22 @@ impl CheckoutManager {
         base_ref: String,
         pin_head: Option<String>,
     ) -> Result<Checkout, CoreError> {
+        self.prepare_noting(repo, number, base_ref, pin_head, &mut false).await
+    }
+}
+
+impl CheckoutManager {
+    /// [`CheckoutManager::prepare`], setting `touched` just before it first
+    /// changes the worktree, after fetching. While it's false on an error, the
+    /// worktree is as it was.
+    pub(crate) async fn prepare_noting(
+        &self,
+        repo: String,
+        number: u64,
+        base_ref: String,
+        pin_head: Option<String>,
+        touched: &mut bool,
+    ) -> Result<Checkout, CoreError> {
         let paths = self.paths(&repo, number)?;
         // These would change what the refspecs below mean; git rejects other bad names itself.
         if base_ref.is_empty() || base_ref.contains([':', '*']) {
@@ -246,6 +262,7 @@ impl CheckoutManager {
             Some(_) => index_missing(wt).await.map_err(checkout_error())?,
             None => false,
         };
+        *touched = true;
         if current.is_none() {
             if Path::new(wt).exists() {
                 remove_dir(wt).await?;
@@ -1242,6 +1259,36 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
         assert_eq!(too_old_for_sparse("git version 2.35.0"), None);
         assert_eq!(too_old_for_sparse("git version 2.50.1 (Apple Git-155)"), None);
         assert_eq!(too_old_for_sparse(""), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_leaves_the_worktree_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().to_str().unwrap();
+        let (remote, work) = (format!("{tmp}/remote/octo/demo.git"), format!("{tmp}/work"));
+        for dir in [&remote, &work] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        run(&remote, &["init", "-q", "--bare"]);
+        run(&work, &["init", "-q", "-b", "main"]);
+        commit(&work, &[("a.txt", "one\n")]);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/heads/main", "HEAD:refs/pull/1/head"]);
+        let prepare = |remote_base: String| async move {
+            let manager = CheckoutManager::with_remote_base(format!("{tmp}/data"), remote_base);
+            let mut touched = false;
+            let result = manager.prepare_noting("octo/demo".into(), 1, "main".into(), None, &mut touched).await;
+            (result, touched)
+        };
+        let (checkout, touched) = prepare(format!("file://{tmp}/remote/")).await;
+        assert!(touched);
+        let wt = checkout.unwrap().worktree_path;
+        std::fs::write(format!("{wt}/a.txt"), "agent edit\n").unwrap();
+
+        // The remote is gone: the fetch fails before the worktree is changed.
+        std::fs::remove_dir_all(format!("{tmp}/remote")).unwrap();
+        let (checkout, touched) = prepare(format!("file://{tmp}/remote/")).await;
+        assert!(checkout.is_err() && !touched);
+        assert_eq!(read(&wt, "a.txt"), "agent edit\n");
     }
 
     #[tokio::test]
