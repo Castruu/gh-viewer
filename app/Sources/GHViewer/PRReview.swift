@@ -204,6 +204,11 @@ final class PRReview {
             let stopReason = try await store.hub.ask(sessionId: sessionId, selection: selection, question: question)
             if stopReason == "cancelled" {
                 chat.append(.stopped)
+            } else if stopReason == "unresponsive" {
+                // The core closed the session, so nothing more from that turn shows up.
+                chat.sessions[kind] = nil
+                chat.append(.stopped)
+                chat.append(.info("\(kind.displayName) didn't stop, so its session was closed. The next question starts a new one."))
             } else if stopReason != "end_turn" {
                 chat.append(.notice("The agent stopped: \(stopReason)."))
             }
@@ -212,13 +217,14 @@ final class PRReview {
         }
     }
 
-    /// Stops the turn. Before the session exists, the question is dropped once it does.
+    /// Stops the turn, once: later calls do nothing until the next question.
+    /// Before the session exists, the question is dropped once it does.
     func cancel() {
-        guard let sessionId = chat.sessions[chat.agent] else {
-            isCancelPending = chat.isRunning
-            return
+        guard chat.isRunning, !isCancelPending else { return }
+        isCancelPending = true
+        if let sessionId = chat.runningSession {
+            store.hub.cancel(sessionId: sessionId)
         }
-        store.hub.cancel(sessionId: sessionId)
     }
 
     /// Answers a permission prompt in the chat; `optionId` nil dismisses it.

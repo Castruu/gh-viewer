@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, own_mcp_server_name};
+use crate::agent::{AgentEvent, AgentHub, AgentKind, AgentListener, HttpHeader, McpServerHttp, STOP_UNRESPONSIVE, own_mcp_server_name};
 use crate::checkout::{Checkout, CheckoutManager, DiffFile, LineKind, hunk_of, is_commentable, remove_agent_config};
 use crate::mcp::{DraftCommentArgs, McpEndpoint, McpServer, ReviewTools};
 use crate::pr::{DraftAuthor, DraftStore, NewDraft, Prepared, PullRequestDetail, ReviewEvent, ReviewThread};
@@ -184,6 +184,11 @@ impl ReviewHub {
             build_prompt(&review, !primed, selection.as_ref(), &question)
         };
         let stop_reason = self.agents.prompt(session_id.clone(), text).await?;
+        if stop_reason == STOP_UNRESPONSIVE {
+            // The agent closed it; its MCP endpoint must not take drafts from that turn either.
+            self.close_agent(session_id);
+            return Ok(stop_reason);
+        }
         // Only now: a prompt that failed, e.g. before signing in, never reached the agent.
         if let Some(info) = self.sessions.lock().unwrap().get_mut(&session_id) {
             info.primed = true;

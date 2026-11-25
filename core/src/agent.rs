@@ -27,7 +27,10 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// every agent start.
 const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a cancelled turn may take to end before `prompt` stops waiting for the agent.
-const CANCEL_GRACE: Duration = Duration::from_secs(5);
+const CANCEL_GRACE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
+/// The stop reason `prompt` gives when the agent didn't end a stopped turn in
+/// time. The session is closed then; the next question needs a new one.
+pub(crate) const STOP_UNRESPONSIVE: &str = "unresponsive";
 const STDERR_LINES: usize = 50;
 /// The most of a Codex command's output kept and shown, from its end.
 const CODEX_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -191,6 +194,9 @@ struct Shared {
     codex_output: HashMap<(String, String), String>,
     /// (session id, server name) of MCP servers the adapter reported it didn't start.
     failed_mcp: HashSet<(String, String)>,
+    /// Sessions closed or gone. What they still send is dropped, so a stopped
+    /// turn can't stream or ask for permission into the next one.
+    retired: HashSet<String>,
 }
 
 impl Shared {
@@ -218,6 +224,7 @@ impl Shared {
     fn forget(&mut self, gone: &[String]) {
         for session_id in gone {
             self.sessions.remove(session_id);
+            self.retired.insert(session_id.clone());
         }
         self.permissions.retain(|_, pending| !gone.contains(&pending.session_id));
         self.own_codex_calls.retain(|(session_id, _), _| !gone.contains(session_id));
@@ -231,7 +238,9 @@ struct Session {
     process: u64,
     cx: ConnectionTo<Agent>,
     /// Woken by `cancel`, so a turn the agent never ends can still stop.
-    cancelled: Arc<tokio::sync::Notify>,
+    /// Set by Stop until the turn ends. Latched, so a Stop that comes before
+    /// `prompt` waits on it still counts.
+    stop: Arc<tokio::sync::watch::Sender<bool>>,
     /// Names of the app's MCP servers passed in `session/new`.
     mcp_servers: Vec<String>,
     /// Whether the adapter supports `session/close`.
@@ -349,7 +358,7 @@ impl AgentHub {
             kind,
             process: process.id,
             cx: process.cx,
-            cancelled: Arc::default(),
+            stop: Arc::new(tokio::sync::watch::channel(false).0),
             mcp_servers: names,
             closes: process.closes,
         };
@@ -357,26 +366,37 @@ impl AgentHub {
         Ok(session_id)
     }
 
-    /// Sends a user turn; resolves with the stop reason ("end_turn", "cancelled", …) when the turn ends.
+    /// Sends a user turn; resolves with the stop reason ("end_turn", "cancelled",
+    /// [`STOP_UNRESPONSIVE`], …) when the turn ends.
     pub async fn prompt(&self, session_id: String, text: String) -> Result<String, CoreError> {
-        let (kind, cx, cancelled) = self
+        let (kind, cx, stop) = self
             .shared()
             .sessions
             .get(&session_id)
-            .map(|session| (session.kind, session.cx.clone(), session.cancelled.clone()))
+            .map(|session| (session.kind, session.cx.clone(), session.stop.clone()))
             .ok_or_else(|| {
                 CoreError::Agent("This agent session has ended. Start a new one.".into())
             })?;
-        let request = acp::PromptRequest::new(session_id, vec![text.into()]);
+        let mut stopped = stop.subscribe();
+        // Stopped before the turn reached the agent.
+        if stop.send_replace(false) {
+            return Ok("cancelled".into());
+        }
+        let request = acp::PromptRequest::new(session_id.clone(), vec![text.into()]);
         // An agent that never answers, e.g. one waiting on a hook, must not keep the turn after Stop.
         let gave_up = async {
-            cancelled.notified().await;
+            let _ = stopped.wait_for(|stopped| *stopped).await;
             tokio::time::sleep(CANCEL_GRACE).await;
         };
         let response = tokio::select! {
             response = cx.send_request(request).block_task() => response,
-            () = gave_up => return Ok("cancelled".into()),
+            () = gave_up => {
+                // Its turn may still go on, e.g. once the hook returns: retire the session.
+                self.close_session(session_id);
+                return Ok(STOP_UNRESPONSIVE.into());
+            }
         };
+        stop.send_replace(false);
         let response = response
             .map_err(|error| {
                 signed_out(kind, &error)
@@ -385,15 +405,18 @@ impl AgentHub {
         Ok(wire_name(&response.stop_reason))
     }
 
-    /// Asks the agent to stop the current turn. `prompt` then resolves with "cancelled".
+    /// Asks the agent to stop the current turn. `prompt` then resolves with
+    /// "cancelled", or [`STOP_UNRESPONSIVE`] if the agent doesn't end the turn.
+    /// Sends one `session/cancel` per turn however often it's called.
     pub fn cancel(&self, session_id: String) {
         let mut shared = self.shared();
-        if let Some(session) = shared.sessions.get(&session_id) {
+        if let Some(session) = shared.sessions.get(&session_id)
+            && !session.stop.send_replace(true)
+        {
             // Only fails if the connection is already gone, which ends the turn anyway.
             let _ = session
                 .cx
                 .send_notification(acp::CancelNotification::new(session_id.clone()));
-            session.cancelled.notify_waiters();
         }
         // ACP requires answering the turn's open permission requests as cancelled.
         shared
@@ -580,8 +603,11 @@ impl AgentHub {
                 async move |notification: acp::SessionNotification, _cx| {
                     let session_id = notification.session_id.to_string();
                     let mut update = notification.update;
+                    let mut shared = lock(&notification_shared);
+                    if shared.retired.contains(&session_id) {
+                        return Ok(());
+                    }
                     if kind == AgentKind::Codex {
-                        let mut shared = lock(&notification_shared);
                         if let Some(failed) = failed_mcp_startup(&update) {
                             // Calls already seen on it aren't the app's either.
                             shared.own_codex_calls.retain(|(id, _), server| *id != session_id || *server != failed);
@@ -591,6 +617,7 @@ impl AgentHub {
                         track_own_codex_call(&mut shared.own_codex_calls, &session_id, &own, &update);
                         collect_codex_output(&mut shared.codex_output, &session_id, &mut update);
                     }
+                    drop(shared);
                     if let Some(event) = event_from_update(update) {
                         listener.on_event(session_id, event);
                     }
@@ -603,21 +630,23 @@ impl AgentHub {
                             responder,
                             cx: ConnectionTo<Agent>| {
                     let json = serde_json::to_value(&request).unwrap_or_default();
-                    let allow = {
-                        let mut shared = lock(&shared);
-                        let own = shared.own_servers(&request.session_id.to_string());
-                        auto_allow(kind, &json, &own, &mut shared.own_codex_calls)
-                    };
-                    if let Some(option_id) = allow {
-                        let outcome = acp::RequestPermissionOutcome::Selected(
-                            acp::SelectedPermissionOutcome::new(option_id),
-                        );
-                        return responder.respond(acp::RequestPermissionResponse::new(outcome));
-                    }
                     let session_id = request.session_id.to_string();
                     let (reply, answer) = oneshot::channel();
+                    // One lock from the liveness check to registering the request, so
+                    // a session retired meanwhile can't leave a request behind.
                     let request_id = {
                         let mut shared = lock(&shared);
+                        let own = shared.own_servers(&session_id);
+                        let now = if shared.retired.contains(&session_id) {
+                            Some(acp::RequestPermissionOutcome::Cancelled)
+                        } else {
+                            auto_allow(kind, &json, &own, &mut shared.own_codex_calls).map(|option_id| {
+                                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id))
+                            })
+                        };
+                        if let Some(outcome) = now {
+                            return responder.respond(acp::RequestPermissionResponse::new(outcome));
+                        }
                         // A per-run prefix, so a card from a saved chat can never match a new request.
                         static RUN: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::mcp::random_hex);
                         let request_id = format!("permission-{}-{}", *RUN, shared.next_id());
@@ -1123,8 +1152,16 @@ mod tests {
                         };
                         say("pong")?;
                         if hang {
-                            // Holds the responder and ignores session/cancel, like an agent stuck on a hook.
+                            // Holds the responder and ignores session/cancel, like an agent
+                            // stuck on a hook, then speaks and asks once the grace is over.
                             let _responder = responder;
+                            tokio::time::sleep(CANCEL_GRACE * 2).await;
+                            say("late")?;
+                            let tool = acp::ToolCallUpdate::new("late-tool", acp::ToolCallUpdateFields::new());
+                            let options = vec![acp::PermissionOption::new("yes", "Allow", acp::PermissionOptionKind::AllowOnce)];
+                            let request = acp::RequestPermissionRequest::new(session_id.clone(), tool, options);
+                            let answer = task_cx.send_request(request).block_task().await?;
+                            say(if matches!(answer.outcome, acp::RequestPermissionOutcome::Cancelled) { "refused" } else { "asked" })?;
                             return std::future::pending().await;
                         }
                         let mut tool = acp::ToolCallUpdate::new(
@@ -1258,10 +1295,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_ends_a_turn_the_agent_never_ends() {
+    async fn stop_retires_a_session_whose_turn_never_ends() {
         let (hub, mut events) = fake_hub();
         let session = hub
-            .new_session(AgentKind::Codex, "/tmp".into(), vec![])
+            .new_session(AgentKind::Codex, "/tmp".into(), vec![server("http://hangs")])
             .await
             .unwrap();
         let (turn_hub, turn_session) = (hub.clone(), session.clone());
@@ -1271,11 +1308,40 @@ mod tests {
             Some((session.clone(), message("pong")))
         );
 
-        hub.cancel(session);
+        hub.cancel(session.clone());
+        hub.cancel(session.clone());
         let stop = tokio::time::timeout(CANCEL_GRACE * 2, turn)
             .await
             .expect("Stop should end the turn after the grace period");
-        assert_eq!(stop.unwrap().unwrap(), "cancelled");
+        assert_eq!(stop.unwrap().unwrap(), STOP_UNRESPONSIVE);
+        closed_on_the_agent(&session).await;
+        let error = hub.prompt(session.clone(), "ping".into()).await.unwrap_err();
+        assert!(error.to_string().contains("session has ended"), "{error}");
+
+        // What the old turn sends later doesn't reach the app, and its permission
+        // request is refused without asking ("refused" is dropped too).
+        tokio::time::sleep(CANCEL_GRACE * 2).await;
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stop_before_the_turn_starts_still_counts() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Codex, "/tmp".into(), vec![server("http://early")])
+            .await
+            .unwrap();
+        hub.cancel(session.clone());
+        assert_eq!(hub.prompt(session.clone(), "hang".into()).await.unwrap(), "cancelled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(events.try_recv().is_err(), "the agent never got the turn");
+
+        // The stop was used up: the next turn reaches the agent.
+        let (turn_hub, turn_session) = (hub.clone(), session.clone());
+        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "hang".into()).await });
+        assert_eq!(events.recv().await, Some((session.clone(), message("pong"))));
+        hub.close_session(session);
+        assert_eq!(turn.await.unwrap().unwrap(), STOP_UNRESPONSIVE);
     }
 
     #[tokio::test]
