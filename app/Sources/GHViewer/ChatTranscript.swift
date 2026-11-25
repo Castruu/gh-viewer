@@ -3,38 +3,47 @@ import SwiftUI
 /// The conversation. Follows the bottom while the agent streams, unless you scrolled up.
 struct ChatTranscript: View {
     let review: PRReview
+    /// Whether the end is in view. Then new content scrolls along; otherwise you stay where you are.
     @State private var isAtBottom = true
+    @State private var contentHeight: CGFloat = 0
     @State private var viewportHeight: CGFloat = 0
-    private let bottom = "bottom"
+    private static let content = "content"
 
     var body: some View {
         let chat = review.chat
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                // Not lazy: lazy stacks estimate row heights, which breaks scrolling to the end.
+                VStack(alignment: .leading, spacing: 14) {
                     ForEach(chat.items) { item in
                         ChatItemRow(item: item, isRunning: chat.isRunning, review: review)
                     }
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottom)
-                        .onGeometryChange(for: Bool.self) { geometry in
-                            geometry.frame(in: .scrollView).minY <= viewportHeight + 24
-                        } action: { isAtBottom = $0 }
                 }
                 .padding(12)
+                .id(Self.content)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .scrollView) } action: { frame in
+                    // Growth also pushes the end out of view until it's followed; only a scroll decides.
+                    if frame.height == contentHeight {
+                        isAtBottom = frame.maxY <= viewportHeight + 30
+                    }
+                    contentHeight = frame.height
+                }
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
-            .onAppear { proxy.scrollTo(bottom, anchor: .bottom) }
+            .onAppear { proxy.scrollTo(Self.content, anchor: .bottom) }
+            .onChange(of: chat.items.last(where: \.isUser)?.id) {
+                // Your own question always brings you back to the end.
+                isAtBottom = true
+                proxy.scrollTo(Self.content, anchor: .bottom)
+            }
             .onChange(of: chat.items.count) {
-                // Your own question always brings you back to the bottom.
-                if isAtBottom || chat.items.last?.isUser == true {
-                    proxy.scrollTo(bottom, anchor: .bottom)
+                if isAtBottom {
+                    proxy.scrollTo(Self.content, anchor: .bottom)
                 }
             }
             .onChange(of: chat.items.last?.streamedLength) {
                 if isAtBottom {
-                    proxy.scrollTo(bottom, anchor: .bottom)
+                    proxy.scrollTo(Self.content, anchor: .bottom)
                 }
             }
         }
@@ -171,7 +180,7 @@ private struct ChatToolRow: View {
     var body: some View {
         if let output, !output.isEmpty {
             DisclosureGroup {
-                ChatToolOutput(output: output, isDiff: kind == "edit")
+                ChatToolOutput(output: output, kind: kind)
             } label: {
                 label
             }
@@ -234,8 +243,7 @@ private struct ChatToolStatusIcon: View {
 /// Monospaced output, as tall as its text up to a cap, then scrolling.
 private struct ChatToolOutput: View {
     let output: String
-    /// Colors `+`/`-` lines, which is how the core renders an edit's diff.
-    let isDiff: Bool
+    let kind: String
     @State private var height: CGFloat = 0
     @Environment(\.palette) private var palette
 
@@ -253,14 +261,23 @@ private struct ChatToolOutput: View {
         .padding(.leading, 16)
     }
 
+    /// Without the code fence Claude wraps command output in, and with diff lines colored:
+    /// an edit's diff (the core renders it as `-`/`+` lines) or a command's unified diff.
     private var text: AttributedString {
-        guard isDiff else { return AttributedString(output) }
+        var lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count > 1, lines[0].hasPrefix("```") {
+            lines.removeFirst()
+            if lines.last?.hasPrefix("```") == true {
+                lines.removeLast()
+            }
+        }
+        let isDiff = kind == "edit" || lines.contains { $0.hasPrefix("@@ ") }
         var text = AttributedString()
-        for (index, line) in output.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        for (index, line) in lines.enumerated() {
             var part = AttributedString((index == 0 ? "" : "\n") + line)
-            if line.hasPrefix("+") {
+            if isDiff && line.hasPrefix("+") && !line.hasPrefix("+++ ") {
                 part.foregroundColor = palette.added
-            } else if line.hasPrefix("-") {
+            } else if isDiff && line.hasPrefix("-") && !line.hasPrefix("--- ") {
                 part.foregroundColor = palette.removed
             }
             text += part
