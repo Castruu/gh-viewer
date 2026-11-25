@@ -335,7 +335,17 @@ impl GitHubClient {
                     store
                         .finish_attempt(repo, number, &attempt)
                         .map_err(|error| posted_but(&recorded.url, error))?;
-                    return Ok(recorded.url);
+                    let unsent = unsent(&attempt, &submission);
+                    if unsent.is_empty() {
+                        return Ok(recorded.url);
+                    }
+                    return Err(CoreError::Api(format!(
+                        "an earlier try already posted your review as {} ({}), so this one wasn't \
+                         sent. Not in it: {}. Submit again to send that as a new review.",
+                        posted_as(&recorded.state),
+                        recorded.url,
+                        unsent.join("; ")
+                    )));
                 }
                 self.resume(attempt, recorded.review, &submission).await?
             }
@@ -471,6 +481,46 @@ impl GitHubClient {
                      Retrying is safe: it won't post the review twice."
                 ))
             })
+    }
+}
+
+/// What this submission has that an earlier attempt, already posted, didn't send.
+fn unsent(attempt: &SubmitAttempt, submission: &Submission) -> Vec<String> {
+    let mut unsent = Vec::new();
+    if submission.event != attempt.event {
+        let verdict = match submission.event {
+            ReviewEvent::Approve => "Approve",
+            ReviewEvent::RequestChanges => "Request Changes",
+            ReviewEvent::Comment => "Comment",
+        };
+        unsent.push(format!("the {verdict} verdict"));
+    }
+    if submission.body.trim() != attempt.body.trim() {
+        unsent.push("this summary".into());
+    }
+    let drafts: Vec<String> = submission
+        .drafts
+        .iter()
+        .filter(|draft| !attempt.drafts.contains(draft))
+        .map(|draft| format!("{}:{}", draft.path, draft.line))
+        .collect();
+    if !drafts.is_empty() {
+        unsent.push(format!(
+            "the drafts on {}, which are still here",
+            drafts.join(", ")
+        ));
+    }
+    unsent
+}
+
+/// A submitted review's state, as the verdict it carries.
+fn posted_as(state: &str) -> &str {
+    match state {
+        "APPROVED" => "an approval",
+        "CHANGES_REQUESTED" => "a request for changes",
+        "COMMENTED" => "a comment",
+        "DISMISSED" => "a review that has since been dismissed",
+        other => other,
     }
 }
 
@@ -1568,6 +1618,54 @@ mod tests {
         assert_eq!(recorded.review.id, "PRR_1");
         assert_eq!(recorded.review.commit_oid, "abc");
         assert_eq!(recorded.review.comments[0].body, "comment 1");
+    }
+
+    #[test]
+    fn names_what_an_earlier_posted_try_left_out() {
+        let sent = draft("1", None);
+        let earlier = SubmitAttempt {
+            review_id: "PRR_1".into(),
+            commit_oid: "abc".into(),
+            event: ReviewEvent::Approve,
+            body: "LGTM".into(),
+            drafts: vec![sent.clone()],
+        };
+        let submission = |event, body: &str, drafts: Vec<DraftComment>| Submission {
+            pull_request_id: "PR_1".into(),
+            commit_oid: "abc".into(),
+            event,
+            body: body.into(),
+            drafts,
+        };
+        // The retry the user meant: nothing differs, so it's a success.
+        assert!(
+            unsent(
+                &earlier,
+                &submission(ReviewEvent::Approve, " LGTM\n", vec![sent.clone()])
+            )
+            .is_empty()
+        );
+        // A draft sent earlier and since removed here doesn't count either.
+        assert!(unsent(&earlier, &submission(ReviewEvent::Approve, "LGTM", vec![])).is_empty());
+
+        let mut edited = sent.clone();
+        edited.body = "reworded".into();
+        let mut late = draft("2", None);
+        late.line = 30;
+        let changed = submission(
+            ReviewEvent::RequestChanges,
+            "Needs work",
+            vec![edited, late],
+        );
+        assert_eq!(
+            unsent(&earlier, &changed),
+            [
+                "the Request Changes verdict",
+                "this summary",
+                "the drafts on src/pr.rs:12, src/pr.rs:30, which are still here",
+            ]
+        );
+        assert_eq!(posted_as("APPROVED"), "an approval");
     }
 
     #[test]
