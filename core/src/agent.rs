@@ -29,6 +29,8 @@ const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a cancelled turn may take to end before `prompt` stops waiting for the agent.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 const STDERR_LINES: usize = 50;
+/// The most of a Codex command's output kept and shown, from its end.
+const CODEX_OUTPUT_LIMIT: usize = 64 * 1024;
 /// Brackets `env -0` output so noise printed by interactive rc files is ignored.
 const ENV_MARKER: &str = "__GHV_SHELL_ENV_5f1c__";
 
@@ -767,7 +769,8 @@ fn track_own_codex_call(
 
 /// codex-acp sends a command's output as chunks to append, in
 /// `_meta.terminal_output_delta`, and only a terminal id as content. Passes
-/// the output so far on as the update's content, which the UI shows.
+/// the output so far on as the update's content, which the UI shows, cut to
+/// its last [`CODEX_OUTPUT_LIMIT`] bytes so a chatty command costs linear time.
 fn collect_codex_output(
     outputs: &mut HashMap<(String, String), String>,
     session_id: &str,
@@ -784,6 +787,13 @@ fn collect_codex_output(
     if let Some(chunk) = chunk {
         let output = outputs.entry(key.clone()).or_default();
         output.push_str(chunk);
+        if output.len() > CODEX_OUTPUT_LIMIT {
+            let mut cut = output.len() - CODEX_OUTPUT_LIMIT;
+            while !output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            output.drain(..cut);
+        }
         if update.fields.content.is_none() {
             update.fields.content = Some(vec![output.clone().into()]);
         }
@@ -1558,6 +1568,17 @@ mod tests {
         collect_codex_output(&mut outputs, "s", &mut last);
         assert_eq!(text(last).as_deref(), Some("README.md\nsrc\n"));
         assert!(outputs.is_empty(), "a finished command's output is dropped");
+
+        // Long output keeps only its end, cut on a char boundary.
+        let line = "é".repeat(1000);
+        for _ in 0..CODEX_OUTPUT_LIMIT / line.len() + 2 {
+            collect_codex_output(&mut outputs, "s", &mut chunk(&line, None));
+        }
+        let mut end = chunk("end", None);
+        collect_codex_output(&mut outputs, "s", &mut end);
+        let shown = text(end).unwrap();
+        assert!(shown.len() <= CODEX_OUTPUT_LIMIT && shown.len() > CODEX_OUTPUT_LIMIT - 4, "{}", shown.len());
+        assert!(shown.ends_with("éend") && shown.starts_with('é'));
     }
 
     /// Checks the Finder case: with a stripped environment, the login shell
