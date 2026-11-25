@@ -12,7 +12,7 @@ edit and submit those.
 
 | # | Decision |
 |---|---|
-| 1 | Main window with three panes (the sidebar switches between the PR list and the open PR's file tree): a sidebar of PRs grouped by what they need from you (your review, your own, already reviewed), the diff, and agent chat. The menu bar icon stays as the badge and entry point. The app is menu-bar-only until the window opens, gets a Dock icon while it's open, and drops it again on close. |
+| 1 | Main window with three panes: a sidebar of PRs grouped by what they need from you (your review, your own, already reviewed), the diff, and agent chat. The menu bar icon stays as the badge and entry point. The app is menu-bar-only until the window opens, gets a Dock icon while it's open, and drops it again on close. |
 | 1a | The sidebar adds open PRs you've already reviewed (`reviewed-by:@me`), because GitHub removes your review request once you review. They get their own section, after the PRs that need your review and your own. |
 | 1b | Clicking a PR in the menu bar opens it in the review window. "Open in browser" moves to a context menu. |
 | 2 | The diff is computed locally from an app-managed checkout, not from GitHub's files API. |
