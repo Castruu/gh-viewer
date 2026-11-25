@@ -27,6 +27,14 @@ struct DiffModelTests {
                          .file(path: "README.md", depth: 0)])
     }
 
+    @Test func foldersInTheFileTreeStartClosed() {
+        let tree = fileTree(of: ["README.md", "src/app/a.swift", "src/main.swift"])
+        #expect(DiffFileList.visible(tree, open: []).map(\.path) == ["src/", "README.md"])
+        #expect(DiffFileList.visible(tree, open: ["src/"]).map(\.path) == ["src/", "src/app/", "src/main.swift", "README.md"])
+        // An open folder inside a closed one stays hidden.
+        #expect(DiffFileList.visible(tree, open: ["src/app/"]).map(\.path) == ["src/", "README.md"])
+    }
+
     @Test func threadsGoUnderALineOnlyOnTheirOwnCommit() {
         let thread = { (id: String, line: UInt32?, commit: String?) in
             ReviewThread(id: id, path: "a.swift", line: line, startLine: nil, side: .right, startSide: nil,

@@ -89,8 +89,8 @@ to pick from for the Dock.
 - The sidebar lists your PRs by what they need: your review, your own, and the
   ones you've already reviewed. Its filter button hides the sections, or the
   viewed files, you don't need to see.
-- The open PR's files are a folder tree beside the diff. The Files button in the
-  toolbar hides it (**⇧⌘F**).
+- The open PR's files are a folder tree beside the diff, with folders closed
+  until you open them. The button on the tree folds it away (**⇧⌘F**).
 - The window opens on the PR you had open last, or the first one waiting on
   you, and moves to the next one after you submit a review.
 - Hover a diff line for the "+", then click the line to comment on it or ask
