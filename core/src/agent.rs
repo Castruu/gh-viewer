@@ -26,6 +26,8 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// An rc file that waits for input or a slow plugin manager must not stall
 /// every agent start.
 const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a cancelled turn may take to end before `prompt` stops waiting for the agent.
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
 const STDERR_LINES: usize = 50;
 /// Brackets `env -0` output so noise printed by interactive rc files is ignored.
 const ENV_MARKER: &str = "__GHV_SHELL_ENV_5f1c__";
@@ -191,6 +193,8 @@ struct Session {
     kind: AgentKind,
     process: u64,
     cx: ConnectionTo<Agent>,
+    /// Woken by `cancel`, so a turn the agent never ends can still stop.
+    cancelled: Arc<tokio::sync::Notify>,
 }
 
 struct PendingPermission {
@@ -278,6 +282,7 @@ impl AgentHub {
             kind,
             process: process.id,
             cx: process.cx,
+            cancelled: Arc::default(),
         };
         shared.sessions.insert(session_id.clone(), session);
         Ok(session_id)
@@ -285,19 +290,25 @@ impl AgentHub {
 
     /// Sends a user turn; resolves with the stop reason ("end_turn", "cancelled", …) when the turn ends.
     pub async fn prompt(&self, session_id: String, text: String) -> Result<String, CoreError> {
-        let (kind, cx) = self
+        let (kind, cx, cancelled) = self
             .shared()
             .sessions
             .get(&session_id)
-            .map(|session| (session.kind, session.cx.clone()))
+            .map(|session| (session.kind, session.cx.clone(), session.cancelled.clone()))
             .ok_or_else(|| {
                 CoreError::Agent("This agent session has ended. Start a new one.".into())
             })?;
         let request = acp::PromptRequest::new(session_id, vec![text.into()]);
-        let response = cx
-            .send_request(request)
-            .block_task()
-            .await
+        // An agent that never answers, e.g. one waiting on a hook, must not keep the turn after Stop.
+        let gave_up = async {
+            cancelled.notified().await;
+            tokio::time::sleep(CANCEL_GRACE).await;
+        };
+        let response = tokio::select! {
+            response = cx.send_request(request).block_task() => response,
+            () = gave_up => return Ok("cancelled".into()),
+        };
+        let response = response
             .map_err(|error| {
                 signed_out(kind, &error)
                     .unwrap_or_else(|| CoreError::Agent(format!("{}: {error}", kind.name())))
@@ -313,6 +324,7 @@ impl AgentHub {
             let _ = session
                 .cx
                 .send_notification(acp::CancelNotification::new(session_id.clone()));
+            session.cancelled.notify_waiters();
         }
         // ACP requires answering the turn's open permission requests as cancelled.
         shared
@@ -953,6 +965,7 @@ mod tests {
                         return responder.respond_with_error(Error::auth_required());
                     }
                     let own_tool = request.prompt == [acp::ContentBlock::from("own tool")];
+                    let hang = request.prompt == [acp::ContentBlock::from("hang")];
                     let session_id = request.session_id;
                     let task_cx = cx.clone();
                     cx.spawn(async move {
@@ -964,6 +977,11 @@ mod tests {
                             ))
                         };
                         say("pong")?;
+                        if hang {
+                            // Holds the responder and ignores session/cancel, like an agent stuck on a hook.
+                            let _responder = responder;
+                            return std::future::pending().await;
+                        }
                         let mut tool = acp::ToolCallUpdate::new(
                             "tool-1",
                             acp::ToolCallUpdateFields::new().title("Run cargo test".to_string()),
@@ -1092,6 +1110,27 @@ mod tests {
         assert_eq!(turn.await.unwrap().unwrap(), "end_turn");
         // Already answered, so this is a no-op.
         hub.respond_permission(request_id, Some("yes".into()));
+    }
+
+    #[tokio::test]
+    async fn stop_ends_a_turn_the_agent_never_ends() {
+        let (hub, mut events) = fake_hub();
+        let session = hub
+            .new_session(AgentKind::Codex, "/tmp".into(), vec![])
+            .await
+            .unwrap();
+        let (turn_hub, turn_session) = (hub.clone(), session.clone());
+        let turn = tokio::spawn(async move { turn_hub.prompt(turn_session, "hang".into()).await });
+        assert_eq!(
+            events.recv().await,
+            Some((session.clone(), message("pong")))
+        );
+
+        hub.cancel(session);
+        let stop = tokio::time::timeout(CANCEL_GRACE * 2, turn)
+            .await
+            .expect("Stop should end the turn after the grace period");
+        assert_eq!(stop.unwrap().unwrap(), "cancelled");
     }
 
     #[tokio::test]
