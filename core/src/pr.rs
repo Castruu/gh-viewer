@@ -90,9 +90,16 @@ mutation($input: AddPullRequestReviewInput!) {
 }
 "#;
 
-/// A review an earlier submit started: still pending, submitted, or gone.
-const REVIEW_STATE: &str = r#"
-query($id: ID!) { node(id: $id) { ... on PullRequestReview { state url } } }
+/// The review an earlier submit started: still pending with its comments, or submitted.
+const RECORDED_REVIEW: &str = r#"
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequestReview {
+      id state url viewerDidAuthor commit { oid }
+      comments(first: 100) { nodes { path line startLine body diffHunk } }
+    }
+  }
+}
 "#;
 
 /// Everything the review window shows about one PR, apart from the diff.
@@ -312,31 +319,27 @@ impl GitHubClient {
         number: u64,
         submission: Submission,
     ) -> Result<String, CoreError> {
-        let earlier = store.attempt(repo, number)?;
-        let prepared = self
-            .prepare_review(
-                &submission.pull_request_id,
-                &submission.commit_oid,
-                &submission.drafts,
-                earlier.as_ref().map(|attempt| attempt.review_id.as_str()),
-            )
-            .await?;
-        let attempt = match (prepared, earlier) {
-            // An earlier try went through; only its answer was lost.
-            (Prepared::Submitted(url), Some(earlier)) => {
-                store
-                    .finish_attempt(repo, number, &earlier)
-                    .map_err(|error| posted_but(&url, error))?;
-                return Ok(url);
+        let attempt = match store.attempt(repo, number)? {
+            // Settled before anything else, even another pending review of yours.
+            Some(attempt) => {
+                let recorded = self.recorded_review(&attempt.review_id).await.map_err(|error| {
+                    CoreError::Api(format!(
+                        "couldn't check the review an earlier submit started ({error}). Its record \
+                         is kept, so retrying can't post twice. If you deleted that review on \
+                         github.com, move {} aside to submit again.",
+                        store.attempt_path(repo, number).unwrap_or_default().display()
+                    ))
+                })?;
+                if recorded.state != "PENDING" {
+                    // An earlier try went through; only its answer was lost.
+                    store
+                        .finish_attempt(repo, number, &attempt)
+                        .map_err(|error| posted_but(&recorded.url, error))?;
+                    return Ok(recorded.url);
+                }
+                self.resume(attempt, recorded.review, &submission).await?
             }
-            (Prepared::Submitted(url), None) => return Ok(url),
-            (Prepared::Pending(review_id), _) => SubmitAttempt {
-                review_id,
-                commit_oid: submission.commit_oid,
-                event: submission.event,
-                body: submission.body,
-                drafts: submission.drafts,
-            },
+            None => self.start(&submission).await?,
         };
         // Recorded before the last step: if its answer is lost, a retry finds the review submitted.
         store.save_attempt(repo, number, Some(&attempt))?;
@@ -348,66 +351,72 @@ impl GitHubClient {
             .map_err(|error| posted_but(&url, error))?;
         Ok(url)
     }
-}
 
-fn posted_but(url: &str, error: CoreError) -> CoreError {
-    CoreError::Storage(format!(
-        "your review was posted ({url}), but its drafts couldn't be deleted ({error}). \
-         Submitting again deletes them without posting the review twice."
-    ))
-}
-
-/// What the first phase of a submit leaves.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Prepared {
-    /// This pending review holds every draft; submit it.
-    Pending(String),
-    /// An earlier try's review was submitted, and only the answer was lost. Its URL.
-    Submitted(String),
-}
-
-impl GitHubClient {
-    /// Phase 1 of a submit: puts every draft into the viewer's pending review on
-    /// `commit_oid`, reusing one from github.com or an earlier try, else starting
-    /// one. `earlier` is the review an earlier try recorded on the drafts. If you
-    /// have a pending review, its comments go out with yours.
-    pub(crate) async fn prepare_review(
-        &self,
-        pull_request_id: &str,
-        commit_oid: &str,
-        comments: &[DraftComment],
-        earlier: Option<&str>,
-    ) -> Result<Prepared, CoreError> {
-        // Looked up fresh: it may have been started, submitted or half-filled by a failed try since the fetch.
+    /// Puts the drafts in the viewer's pending review on the submission's
+    /// commit: one from github.com, whose comments then go out too, or a new one.
+    async fn start(&self, submission: &Submission) -> Result<SubmitAttempt, CoreError> {
         let lookup = format!("{PENDING_LOOKUP}{PENDING_REVIEWS}");
         let pending = parse_pending_lookup(
             &self
-                .graphql(&lookup, json!({ "id": pull_request_id }))
+                .graphql(&lookup, json!({ "id": submission.pull_request_id }))
                 .await?,
         )?;
-        let earlier = match (&pending, earlier) {
-            (None, Some(id)) => {
-                parse_review_state(&self.graphql(REVIEW_STATE, json!({ "id": id })).await?)?
+        let review_id = match pending {
+            Some(pending) => {
+                check_pending_commit(&pending, &submission.commit_oid)?;
+                let new = new_drafts(&submission.drafts, &pending.comments);
+                self.add_threads(&pending.id, &new).await?;
+                pending.id
             }
-            _ => None,
-        };
-        let pending = match next_step(pending, earlier) {
-            Step::Extend(pending) => pending,
-            Step::Done(url) => return Ok(Prepared::Submitted(url)),
-            Step::Create => {
-                let variables = create_pending_variables(pull_request_id, commit_oid, comments);
+            None => {
+                let variables = create_pending_variables(
+                    &submission.pull_request_id,
+                    &submission.commit_oid,
+                    &submission.drafts,
+                );
                 let data = parse_mutation(&self.graphql(CREATE_PENDING, variables).await?)?;
-                return data
-                    .pointer("/addPullRequestReview/pullRequestReview/id")
+                data.pointer("/addPullRequestReview/pullRequestReview/id")
                     .and_then(Value::as_str)
-                    .map(|id| Prepared::Pending(id.to_owned()))
-                    .ok_or_else(|| CoreError::Api("GitHub's response had no review id".into()));
+                    .map(str::to_owned)
+                    .ok_or_else(|| CoreError::Api("GitHub's response had no review id".into()))?
             }
         };
+        Ok(SubmitAttempt {
+            review_id,
+            commit_oid: submission.commit_oid.clone(),
+            event: submission.event,
+            body: submission.body.clone(),
+            drafts: submission.drafts.clone(),
+        })
+    }
 
-        check_pending_commit(&pending, commit_oid)?;
-        let new = new_drafts(comments, &pending.comments);
-        // Retrying after a failure is safe: drafts already in the pending review are skipped above.
+    /// Continues an earlier attempt in its own pending review, and only that one.
+    async fn resume(
+        &self,
+        attempt: SubmitAttempt,
+        review: PendingReview,
+        submission: &Submission,
+    ) -> Result<SubmitAttempt, CoreError> {
+        check_pending_commit(&review, &submission.commit_oid)?;
+        let new = new_drafts(&submission.drafts, &review.comments);
+        self.add_threads(&review.id, &new).await?;
+        let mut drafts = attempt.drafts;
+        for draft in &submission.drafts {
+            if !drafts.contains(draft) {
+                drafts.push(draft.clone());
+            }
+        }
+        Ok(SubmitAttempt {
+            review_id: review.id,
+            commit_oid: submission.commit_oid.clone(),
+            event: submission.event,
+            body: submission.body.clone(),
+            drafts,
+        })
+    }
+
+    async fn add_threads(&self, review_id: &str, new: &[&DraftComment]) -> Result<(), CoreError> {
+        // Retrying after a failure is safe: drafts already in the pending review are skipped.
         let partial = |added: usize, error: CoreError| {
             CoreError::Api(format!(
                 "added {added} of {} comments to your pending review on GitHub, then failed: {error}. \
@@ -417,7 +426,7 @@ impl GitHubClient {
         };
         for (added, draft) in new.iter().enumerate() {
             let result = self
-                .graphql(ADD_THREAD, add_thread_variables(&pending.id, draft))
+                .graphql(ADD_THREAD, add_thread_variables(review_id, draft))
                 .await
                 .and_then(|response| parse_mutation(&response))
                 .and_then(|data| {
@@ -432,11 +441,21 @@ impl GitHubClient {
                 });
             result.map_err(|error| partial(added, error))?;
         }
-        Ok(Prepared::Pending(pending.id))
+        Ok(())
+    }
+
+    /// The review an earlier submit recorded. Any error fails, even with a null
+    /// node: it may be passing, and a review that still exists must not be redone.
+    async fn recorded_review(&self, review_id: &str) -> Result<RecordedReview, CoreError> {
+        parse_recorded_review(
+            &self
+                .graphql(RECORDED_REVIEW, json!({ "id": review_id }))
+                .await?,
+        )
     }
 
     /// Phase 2 of a submit: submits the pending review; returns its URL.
-    pub(crate) async fn submit_pending_review(
+    async fn submit_pending_review(
         &self,
         review_id: &str,
         event: ReviewEvent,
@@ -455,45 +474,50 @@ impl GitHubClient {
     }
 }
 
+fn posted_but(url: &str, error: CoreError) -> CoreError {
+    CoreError::Storage(format!(
+        "your review was posted ({url}), but its drafts couldn't be deleted ({error}). \
+         Submitting again deletes them without posting the review twice."
+    ))
+}
+
 /// A review an earlier submit started, as GitHub has it now.
-#[derive(Debug, PartialEq, Deserialize)]
-struct ReviewState {
+#[derive(Debug, PartialEq)]
+struct RecordedReview {
+    /// PENDING until submitted; then COMMENTED, APPROVED, CHANGES_REQUESTED or DISMISSED.
     state: String,
     url: String,
+    review: PendingReview,
 }
 
-#[derive(Debug, PartialEq)]
-enum Step {
-    /// Add the drafts it's missing to the viewer's pending review.
-    Extend(PendingReview),
-    /// An earlier try's review was submitted; this is its URL.
-    Done(String),
-    /// Start a pending review with every draft.
-    Create,
-}
-
-/// Decides phase 1 of a submit. `earlier` is the state of the review an earlier
-/// try started, looked up only when the viewer has no pending review.
-fn next_step(pending: Option<PendingReview>, earlier: Option<ReviewState>) -> Step {
-    match (pending, earlier) {
-        (Some(pending), _) => Step::Extend(pending),
-        // COMMENTED, APPROVED, CHANGES_REQUESTED and DISMISSED all mean it was submitted.
-        (None, Some(earlier)) if earlier.state != "PENDING" => Step::Done(earlier.url),
-        (None, _) => Step::Create,
+/// Parses `RECORDED_REVIEW`.
+fn parse_recorded_review(body: &str) -> Result<RecordedReview, CoreError> {
+    #[derive(Deserialize)]
+    struct Node {
+        state: String,
+        url: String,
+        #[serde(flatten)]
+        review: ReviewNode,
     }
-}
-
-/// Parses `REVIEW_STATE`. `None` when the review is gone, e.g. deleted on github.com.
-fn parse_review_state(body: &str) -> Result<Option<ReviewState>, CoreError> {
-    let (data, messages) = split_response(body)?;
-    match data.get("node") {
-        // An id that no longer resolves comes back as a null node with a NOT_FOUND error.
-        Some(Value::Null) => Ok(None),
-        Some(node) => serde_json::from_value(node.clone())
-            .map(Some)
-            .map_err(unexpected),
-        None => Err(api_error(messages)),
+    let (mut data, messages) = split_response(body)?;
+    if !messages.is_empty() {
+        return Err(api_error(messages));
     }
+    let node = data
+        .pointer_mut("/node")
+        .map(Value::take)
+        .unwrap_or_default();
+    if node.is_null() {
+        return Err(CoreError::Api(
+            "GitHub returned no review for its id".into(),
+        ));
+    }
+    let node: Node = serde_json::from_value(node).map_err(unexpected)?;
+    Ok(RecordedReview {
+        state: node.state,
+        url: node.url,
+        review: pending_review(node.review),
+    })
 }
 
 fn review_url(data: &Value, pointer: &str) -> Result<String, CoreError> {
@@ -740,6 +764,10 @@ fn viewer_pending_review(reviews: Option<Connection<ReviewNode>>) -> Option<Pend
         .nodes
         .into_iter()
         .find(|review| review.viewer_did_author)?;
+    Some(pending_review(review))
+}
+
+fn pending_review(review: ReviewNode) -> PendingReview {
     // shortcut: only the first 100 comments of a pending review are read, so past that the count is low and a retry could repeat a draft; paginate if reviews that big show up.
     let comments = review.comments.nodes.into_iter().map(|comment| {
         // The hunk ends at the commented line, and only a removed line is on the left.
@@ -760,11 +788,11 @@ fn viewer_pending_review(reviews: Option<Connection<ReviewNode>>) -> Option<Pend
             body: comment.body,
         }
     });
-    Some(PendingReview {
+    PendingReview {
         id: review.id,
         commit_oid: review.commit.map(|commit| commit.oid).unwrap_or_default(),
         comments: comments.collect(),
-    })
+    }
 }
 
 /// Leaves out the viewer's pending comments, which `pending_review` already
@@ -1073,7 +1101,7 @@ impl DraftStore {
     }
 
     /// Next to the drafts file, so it's moved or deleted with it.
-    fn attempt_path(&self, repo: &str, number: u64) -> Result<PathBuf, CoreError> {
+    pub(crate) fn attempt_path(&self, repo: &str, number: u64) -> Result<PathBuf, CoreError> {
         Ok(self.path(repo, number)?.with_extension("submit.json"))
     }
 
@@ -1524,54 +1552,39 @@ mod tests {
     }
 
     #[test]
-    fn a_retry_never_posts_a_review_twice() {
-        let review = |state: &str| ReviewState {
-            state: state.into(),
-            url: "https://github.com/o/r/pull/7#pullrequestreview-9".into(),
-        };
-        let pending = PendingReview {
-            id: "PRR_1".into(),
-            commit_oid: "abc".into(),
-            comments: vec![],
-        };
-        // A pending review, from github.com or an earlier try, gets the drafts it's missing.
+    fn parses_the_recorded_review() {
+        let pending = r#"{ "data": { "node": {
+          "id": "PRR_1", "state": "PENDING", "url": "https://github.com/o/r/pull/7#pullrequestreview-9",
+          "viewerDidAuthor": true, "commit": { "oid": "abc" },
+          "comments": { "nodes": [
+            { "path": "src/pr.rs", "line": 12, "startLine": null, "body": "comment 1",
+              "diffHunk": "@@ -1,2 +1,12 @@\n+fn b() {}" } ] } } } }"#;
+        let recorded = parse_recorded_review(pending).unwrap();
+        assert_eq!(recorded.state, "PENDING");
         assert_eq!(
-            next_step(Some(pending.clone()), None),
-            Step::Extend(pending.clone())
+            recorded.url,
+            "https://github.com/o/r/pull/7#pullrequestreview-9"
         );
-        assert_eq!(
-            next_step(Some(pending.clone()), Some(review("APPROVED"))),
-            Step::Extend(pending)
-        );
-        // The earlier try went through; only its answer was lost.
-        for state in ["COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"] {
-            assert_eq!(
-                next_step(None, Some(review(state))),
-                Step::Done("https://github.com/o/r/pull/7#pullrequestreview-9".into()),
-                "{state}"
-            );
-        }
-        // Nothing went through, or the earlier review was deleted.
-        assert_eq!(next_step(None, None), Step::Create);
-        assert_eq!(next_step(None, Some(review("PENDING"))), Step::Create);
+        assert_eq!(recorded.review.id, "PRR_1");
+        assert_eq!(recorded.review.commit_oid, "abc");
+        assert_eq!(recorded.review.comments[0].body, "comment 1");
     }
 
     #[test]
-    fn parses_an_earlier_reviews_state() {
-        let submitted = r#"{ "data": { "node": { "state": "APPROVED", "url": "https://github.com/o/r/pull/7#pullrequestreview-9" } } }"#;
-        assert_eq!(
-            parse_review_state(submitted).unwrap(),
-            Some(ReviewState {
-                state: "APPROVED".into(),
-                url: "https://github.com/o/r/pull/7#pullrequestreview-9".into()
-            })
-        );
-        let deleted = r#"{ "data": { "node": null },
+    fn never_takes_a_recorded_review_for_deleted() {
+        // GitHub answers a deleted id like this, but so could a passing failure: keep the record.
+        let null_with_errors = r#"{ "data": { "node": null },
           "errors": [ { "type": "NOT_FOUND", "message": "Could not resolve to a node with the global id of 'PRR_1'" } ] }"#;
-        assert_eq!(parse_review_state(deleted).unwrap(), None);
+        assert!(
+            parse_recorded_review(null_with_errors)
+                .unwrap_err()
+                .to_string()
+                .contains("Could not resolve")
+        );
+        assert!(parse_recorded_review(r#"{ "data": { "node": null } }"#).is_err());
         let failed = r#"{ "errors": [ { "message": "API rate limit exceeded" } ] }"#;
         assert!(
-            parse_review_state(failed)
+            parse_recorded_review(failed)
                 .unwrap_err()
                 .to_string()
                 .contains("rate limit")
