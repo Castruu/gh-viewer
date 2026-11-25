@@ -5,6 +5,7 @@ import SwiftUI
 struct DiffLineComments: View {
     let review: PRReview
     let threads: [ReviewThread]
+    let pending: [PendingComment]
     let drafts: [DraftComment]
     /// Set when the new-comment composer belongs under this line.
     let composing: Selection?
@@ -14,6 +15,9 @@ struct DiffLineComments: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(threads, id: \.id) { thread in
                 DiffThreadView(thread: thread)
+            }
+            ForEach(Array(pending.enumerated()), id: \.offset) { _, comment in
+                DiffPendingCard(comment: comment, pullRequestURL: review.url)
             }
             ForEach(drafts, id: \.id) { draft in
                 if editor == .draft(id: draft.id) {
@@ -120,6 +124,43 @@ private struct DiffThreadComment: View {
             .font(.callout)
             DiffMarkdown(text: comment.body)
         }
+    }
+}
+
+/// A comment in your pending review on github.com, which submitting sends too. Read-only here.
+struct DiffPendingCard: View {
+    let comment: PendingComment
+    /// Where it belongs, when it isn't shown under its line.
+    var location: String?
+    let pullRequestURL: String
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        DiffCard(tint: palette.pending) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Label("Pending on GitHub", systemImage: "clock")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(palette.pending)
+                    if let detail = location ?? lines {
+                        Text(detail).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if let url = URL(string: pullRequestURL + "/files") {
+                        Link("Edit on github.com", destination: url)
+                            .help("You started this comment on github.com. Edit or delete it there; it's submitted with your review")
+                    }
+                }
+                .font(.callout)
+                DiffMarkdown(text: comment.body)
+            }
+        }
+    }
+
+    /// "Lines 10–14" for a multi-line comment.
+    private var lines: String? {
+        guard let start = comment.startLine, let line = comment.line, start != line else { return nil }
+        return "Lines \(start)–\(line)"
     }
 }
 

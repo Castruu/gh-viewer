@@ -12,21 +12,27 @@ struct DiffList: View {
     let setViewed: (String, Bool) -> Void
     /// Where a shift-click extends from: the last plain click, if it's still an end of the selection.
     @State private var anchor: (path: String, row: Int)?
-    @State private var shownOutdated: Set<String> = []
+    /// Files whose header notes (outdated, latest-push and pending comments) are expanded.
+    @State private var shownNotes: Set<String> = []
     @State private var escapeMonitor: Any?
 
     var body: some View {
-        let annotations = DiffAnnotations(threads: review.opened?.detail.threads ?? [], drafts: review.drafts)
+        let opened = review.opened
+        let pendingReview = opened?.detail.pendingReview
+        let annotations = DiffAnnotations(threads: opened?.detail.threads ?? [], drafts: review.drafts,
+                                          pending: pendingReview?.comments ?? [],
+                                          threadsInline: !review.hasNewerCommits,
+                                          pendingInline: pendingReview?.commitOid == opened?.checkout.headOid)
         let viewed = review.viewedPaths
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
                     ForEach(files) { file in
                         let isExpanded = expanded[file.id] ?? !(viewed.contains(file.id) || file.isLarge)
-                        let outdated = annotations.outdated[file.id] ?? []
+                        let notes = annotations.notes[file.id] ?? DiffFileNotes()
                         Section {
-                            if shownOutdated.contains(file.id) && !outdated.isEmpty {
-                                DiffOutdatedThreads(threads: outdated)
+                            if shownNotes.contains(file.id) && !notes.isEmpty {
+                                DiffFileNotesView(notes: notes, review: review)
                             }
                             if isExpanded {
                                 content(of: file, annotations: annotations)
@@ -36,13 +42,13 @@ struct DiffList: View {
                             }
                         } header: {
                             DiffFileHeader(file: file, isExpanded: isExpanded, isViewed: viewed.contains(file.id),
-                                           outdatedCount: outdated.count,
-                                           isShowingOutdated: shownOutdated.contains(file.id)) {
+                                           notes: notes.isEmpty ? nil : notes.summary,
+                                           isShowingNotes: shownNotes.contains(file.id)) {
                                 expanded[file.id] = !isExpanded
                                 // Collapsing from deep inside a file would otherwise leave you in the next one.
                                 if isExpanded { proxy.scrollTo(file.id, anchor: .top) }
-                            } toggleOutdated: {
-                                shownOutdated.formSymmetricDifference([file.id])
+                            } toggleNotes: {
+                                shownNotes.formSymmetricDifference([file.id])
                             } setViewed: { setViewed(file.id, $0) }
                             .id(file.id)
                         }
@@ -97,11 +103,12 @@ struct DiffList: View {
         let anchors = DiffAnnotations.anchors(of: line, in: file.id)
         let threads = anchors.flatMap { annotations.threads[$0] ?? [] }
         let drafts = anchors.flatMap { annotations.drafts[$0] ?? [] }
+        let pending = anchors.flatMap { annotations.pending[$0] ?? [] }
         let composing = editor?.newComment.flatMap {
             DiffAnchor(path: $0.path, side: $0.side, line: $0.line) == anchors[0] ? $0 : nil
         }
-        guard !threads.isEmpty || !drafts.isEmpty || composing != nil else { return nil }
-        return DiffRowComments(threads: threads, drafts: drafts, composing: composing, editor: editor)
+        guard !threads.isEmpty || !drafts.isEmpty || !pending.isEmpty || composing != nil else { return nil }
+        return DiffRowComments(threads: threads, pending: pending, drafts: drafts, composing: composing, editor: editor)
     }
 
     private func select(_ row: Int, in file: DiffFileModel) {
@@ -119,6 +126,7 @@ struct DiffList: View {
 /// What shows under a line. `editor` is included so rows redraw when it opens or closes.
 struct DiffRowComments: Equatable {
     let threads: [ReviewThread]
+    let pending: [PendingComment]
     let drafts: [DraftComment]
     let composing: Selection?
     let editor: DiffEditorTarget?
@@ -157,7 +165,8 @@ struct DiffRowView: View, Equatable {
                         }
                     }
                 if let comments {
-                    DiffLineComments(review: review, threads: comments.threads, drafts: comments.drafts,
+                    DiffLineComments(review: review, threads: comments.threads, pending: comments.pending,
+                                     drafts: comments.drafts,
                                      composing: comments.composing, editor: $editor)
                 }
             }
@@ -230,15 +239,16 @@ struct DiffHunkRow: View {
     }
 }
 
-/// The sticky bar above each file: collapse chevron, path, counts, outdated threads and Viewed.
+/// The sticky bar above each file: collapse chevron, path, counts, comments not on a line, and Viewed.
 struct DiffFileHeader: View {
     let file: DiffFileModel
     let isExpanded: Bool
     let isViewed: Bool
-    let outdatedCount: Int
-    let isShowingOutdated: Bool
+    /// Summary of the comments listed from the header instead of under a line, if any.
+    let notes: String?
+    let isShowingNotes: Bool
     let toggleExpanded: () -> Void
-    let toggleOutdated: () -> Void
+    let toggleNotes: () -> Void
     let setViewed: (Bool) -> Void
 
     var body: some View {
@@ -257,14 +267,14 @@ struct DiffFileHeader: View {
                 .textSelection(.enabled)
             DiffLineCounts(additions: file.additions, deletions: file.deletions)
             Spacer(minLength: 8)
-            if outdatedCount > 0 {
-                Button(action: toggleOutdated) {
-                    Label(countLabel(outdatedCount, "outdated thread"), systemImage: "clock.arrow.circlepath")
+            if let notes {
+                Button(action: toggleNotes) {
+                    Label(notes, systemImage: "clock.arrow.circlepath")
                 }
                 .buttonStyle(.link)
                 .font(.caption)
-                .help(isShowingOutdated ? "Hide threads on lines no longer in the diff"
-                                        : "Show threads on lines no longer in the diff")
+                .help(isShowingNotes ? "Hide comments that aren't on a line of this diff"
+                                     : "Show comments that aren't on a line of this diff")
             }
             Toggle("Viewed", isOn: Binding(get: { isViewed }, set: setViewed))
                 .toggleStyle(.checkbox)
@@ -279,16 +289,33 @@ struct DiffFileHeader: View {
     }
 }
 
-/// Threads whose lines are gone from the diff, listed at the top of their file.
-struct DiffOutdatedThreads: View {
-    let threads: [ReviewThread]
+/// A file's comments that aren't on a line of this diff, listed at the top of the file.
+struct DiffFileNotesView: View {
+    let notes: DiffFileNotes
+    let review: PRReview
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(threads, id: \.id) { DiffThreadView(thread: $0) }
+            if !notes.latestPush.isEmpty {
+                Text("These threads refer to lines in the latest push. Your drafts hold the diff on \(review.shortHeadOid); submit or discard them to see the threads in place.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ForEach(notes.latestPush, id: \.id) { DiffThreadView(thread: $0) }
+            }
+            ForEach(notes.outdated, id: \.id) { DiffThreadView(thread: $0) }
+            ForEach(Array(notes.pending.enumerated()), id: \.offset) { _, comment in
+                DiffPendingCard(comment: comment, location: location(of: comment), pullRequestURL: review.url)
+            }
         }
         .padding(12)
         .frame(maxWidth: 820, alignment: .leading)
+    }
+
+    /// "Whole file", or the line and the commit the pending review was started on.
+    private func location(of comment: PendingComment) -> String {
+        guard let line = comment.line else { return "Whole file" }
+        let commit = review.opened?.detail.pendingReview?.commitOid.prefix(7) ?? ""
+        return "Line \(line) on \(commit.isEmpty ? "an earlier commit" : String(commit))"
     }
 }
 
@@ -317,6 +344,7 @@ struct DiffSelectionBar: View {
     let review: PRReview
     let canComment: Bool
     let comment: () -> Void
+    @Environment(\.palette) private var palette
 
     var body: some View {
         HStack(spacing: 2) {
@@ -334,6 +362,7 @@ struct DiffSelectionBar: View {
             .help("Ask the agent in the chat about the selected lines")
         }
         .buttonStyle(.borderless)
+        .tint(palette.selection)
         .font(.caption)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
@@ -343,5 +372,3 @@ struct DiffSelectionBar: View {
         .padding(.trailing, 8)
     }
 }
-    @Environment(\.palette) private var palette
-        .tint(palette.selection)

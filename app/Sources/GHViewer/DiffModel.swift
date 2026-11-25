@@ -94,23 +94,36 @@ extension DiffLine {
     }
 }
 
-/// Threads and drafts by the line they're shown under.
+/// Threads, drafts and pending github.com comments by the line they're shown under,
+/// and per file what can't go under a line.
 struct DiffAnnotations {
     var threads: [DiffAnchor: [ReviewThread]] = [:]
     var drafts: [DiffAnchor: [DraftComment]] = [:]
-    /// Threads whose line is no longer in the diff, by path.
-    var outdated: [String: [ReviewThread]] = [:]
+    var pending: [DiffAnchor: [PendingComment]] = [:]
+    var notes: [String: DiffFileNotes] = [:]
 
-    init(threads: [ReviewThread], drafts: [DraftComment]) {
+    /// `threadsInline` is false while drafts pin the diff to an older commit, since thread lines
+    /// refer to the latest push. `pendingInline` is false when the pending review is on another commit.
+    init(threads: [ReviewThread], drafts: [DraftComment], pending: [PendingComment],
+         threadsInline: Bool, pendingInline: Bool) {
         for thread in threads {
-            if let line = thread.line {
+            if let line = thread.line, threadsInline {
                 self.threads[DiffAnchor(path: thread.path, side: thread.side, line: line), default: []].append(thread)
+            } else if thread.line == nil {
+                notes[thread.path, default: DiffFileNotes()].outdated.append(thread)
             } else {
-                outdated[thread.path, default: []].append(thread)
+                notes[thread.path, default: DiffFileNotes()].latestPush.append(thread)
             }
         }
         for draft in drafts {
             self.drafts[DiffAnchor(path: draft.path, side: draft.side, line: draft.line), default: []].append(draft)
+        }
+        for comment in pending {
+            if let line = comment.line, pendingInline {
+                self.pending[DiffAnchor(path: comment.path, side: comment.side, line: line), default: []].append(comment)
+            } else {
+                notes[comment.path, default: DiffFileNotes()].pending.append(comment)
+            }
         }
     }
 
@@ -122,6 +135,26 @@ struct DiffAnnotations {
             anchors.append(DiffAnchor(path: path, side: .left, line: old))
         }
         return anchors
+    }
+}
+
+/// A file's comments that can't sit under a line of this diff, listed from its header.
+struct DiffFileNotes {
+    /// Threads on lines that are no longer in the PR.
+    var outdated: [ReviewThread] = []
+    /// Threads on the latest push, while drafts hold the diff on an older commit.
+    var latestPush: [ReviewThread] = []
+    /// Your pending github.com comments on the whole file, or started on another commit.
+    var pending: [PendingComment] = []
+
+    var isEmpty: Bool { outdated.isEmpty && latestPush.isEmpty && pending.isEmpty }
+
+    /// "1 outdated · 2 on latest push · 1 pending"
+    var summary: String {
+        [(outdated.count, "outdated"), (latestPush.count, "on latest push"), (pending.count, "pending")]
+            .filter { $0.0 > 0 }
+            .map { "\($0.0) \($0.1)" }
+            .joined(separator: " · ")
     }
 }
 
