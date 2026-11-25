@@ -176,6 +176,8 @@ struct Shared {
     permissions: HashMap<String, PendingPermission>,
     /// (session id, tool call id) of running Codex calls to the app's own MCP tools.
     own_codex_calls: HashSet<(String, String)>,
+    /// Output so far of running Codex commands, by (session id, tool call id).
+    codex_output: HashMap<(String, String), String>,
 }
 
 impl Shared {
@@ -404,6 +406,9 @@ impl AgentHub {
                 shared
                     .own_codex_calls
                     .retain(|(session_id, _)| !gone.contains(session_id));
+                shared
+                    .codex_output
+                    .retain(|(session_id, _), _| !gone.contains(session_id));
                 gone
             };
             for session_id in gone {
@@ -483,14 +488,13 @@ impl AgentHub {
             .on_receive_notification(
                 async move |notification: acp::SessionNotification, _cx| {
                     let session_id = notification.session_id.to_string();
+                    let mut update = notification.update;
                     if kind == AgentKind::Codex {
-                        track_own_codex_call(
-                            &mut lock(&notification_shared).own_codex_calls,
-                            &session_id,
-                            &notification.update,
-                        );
+                        let mut shared = lock(&notification_shared);
+                        track_own_codex_call(&mut shared.own_codex_calls, &session_id, &update);
+                        collect_codex_output(&mut shared.codex_output, &session_id, &mut update);
                     }
-                    if let Some(event) = event_from_update(notification.update) {
+                    if let Some(event) = event_from_update(update) {
                         listener.on_event(session_id, event);
                     }
                     Ok(())
@@ -645,6 +649,37 @@ fn track_own_codex_call(
             own_codex_calls.remove(&(session_id.to_owned(), update.tool_call_id.to_string()));
         }
         _ => {}
+    }
+}
+
+/// codex-acp sends a command's output as chunks to append, in
+/// `_meta.terminal_output_delta`, and only a terminal id as content. Passes
+/// the output so far on as the update's content, which the UI shows.
+fn collect_codex_output(
+    outputs: &mut HashMap<(String, String), String>,
+    session_id: &str,
+    update: &mut acp::SessionUpdate,
+) {
+    let acp::SessionUpdate::ToolCallUpdate(update) = update else {
+        return;
+    };
+    let key = (session_id.to_owned(), update.tool_call_id.to_string());
+    let chunk = update
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("terminal_output_delta")?["data"].as_str());
+    if let Some(chunk) = chunk {
+        let output = outputs.entry(key.clone()).or_default();
+        output.push_str(chunk);
+        if update.fields.content.is_none() {
+            update.fields.content = Some(vec![output.clone().into()]);
+        }
+    }
+    if matches!(
+        update.fields.status,
+        Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+    ) {
+        outputs.remove(&key);
     }
 }
 
@@ -1260,6 +1295,36 @@ mod tests {
             Some("ran\nsrc/a.rs\n-old\n+new\n+lines")
         );
         assert_eq!(render_content(vec![]), None);
+    }
+
+    #[test]
+    fn appends_codex_command_output_chunks() {
+        // As codex-acp 2.12 sends them: the output in `_meta`, the exit with the last chunk.
+        let chunk = |data: &str, status: Option<&str>| {
+            let mut json = serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "exec-1",
+                "_meta": {"terminal_output_delta": {"data": data, "terminal_id": "exec-1"}},
+            });
+            if let Some(status) = status {
+                json["status"] = status.into();
+            }
+            serde_json::from_value::<acp::SessionUpdate>(json).unwrap()
+        };
+        let text = |update| match event_from_update(update) {
+            Some(AgentEvent::ToolCallUpdate { text, .. }) => text,
+            other => panic!("expected a tool call update, got {other:?}"),
+        };
+        let mut outputs = HashMap::new();
+
+        let mut first = chunk("README.md\n", None);
+        collect_codex_output(&mut outputs, "s", &mut first);
+        assert_eq!(text(first).as_deref(), Some("README.md\n"));
+
+        let mut last = chunk("src\n", Some("completed"));
+        collect_codex_output(&mut outputs, "s", &mut last);
+        assert_eq!(text(last).as_deref(), Some("README.md\nsrc\n"));
+        assert!(outputs.is_empty(), "a finished command's output is dropped");
     }
 
     /// Checks the Finder case: with a stripped environment, the login shell
