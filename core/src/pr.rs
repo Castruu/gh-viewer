@@ -852,6 +852,19 @@ impl DraftStore {
 }
 
 impl DraftStore {
+    /// Deletes the drafts a review just sent. Drafts added while it was in flight stay.
+    pub(crate) fn remove_submitted(
+        &self,
+        repo: &str,
+        number: u64,
+        submitted: &[DraftComment],
+    ) -> Result<(), CoreError> {
+        self.change(repo, number, |drafts| {
+            drafts.retain(|draft| !submitted.contains(draft));
+            Ok(())
+        })
+    }
+
     fn path(&self, repo: &str, number: u64) -> Result<PathBuf, CoreError> {
         let (owner, name) = split_repo(repo).ok_or_else(|| {
             CoreError::Storage(format!("invalid repo {repo:?}, expected \"owner/name\""))
@@ -1584,6 +1597,18 @@ mod tests {
             Err(CoreError::Storage(_))
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "[{ not json");
+    }
+
+    #[test]
+    fn removing_submitted_drafts_keeps_ones_added_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store.add("o/r".into(), 7, new_draft("sent")).unwrap();
+        let submitted = store.list("o/r".into(), 7).unwrap();
+        // An agent drafts while GitHub is still answering.
+        let late = store.add("o/r".into(), 7, new_draft("late")).unwrap();
+        store.remove_submitted("o/r", 7, &submitted).unwrap();
+        assert_eq!(store.list("o/r".into(), 7).unwrap(), [late]);
     }
 
     #[test]

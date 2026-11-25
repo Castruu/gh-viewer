@@ -169,7 +169,7 @@ impl ReviewHub {
     }
 
     /// Submits the PR's drafts as one review against the commit they were
-    /// written on, then deletes them. Returns the review's URL.
+    /// written on, then deletes the ones it sent. Returns the review's URL.
     pub async fn submit(
         &self,
         repo: String,
@@ -187,9 +187,9 @@ impl ReviewHub {
         let commit = drafts.first().map(|d| d.commit_oid.clone()).unwrap_or(head);
         let url = self
             .github
-            .submit_review(pull_request_id, commit, event, body, drafts)
+            .submit_review(pull_request_id, commit, event, body, drafts.clone())
             .await?;
-        self.drafts.clear(repo, number)?;
+        self.drafts.remove_submitted(&repo, number, &drafts)?;
         Ok(url)
     }
 }
