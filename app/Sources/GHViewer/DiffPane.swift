@@ -13,7 +13,7 @@ struct DiffPane: View {
     @State private var isSubmitPresented = false
     /// HSplitView can't set a starting width, so the split is drawn here; it's kept across PRs.
     @AppStorage("diffFileListWidth") private var fileListWidth = 230.0
-    @AppStorage(DiffSummaryBar.showsFilesKey) private var showsFiles = true
+    @AppStorage(DiffFileList.showsKey) private var showsFiles = true
     @State private var isConfirmingDiscard = false
     @Environment(\.palette) private var palette
 
@@ -209,21 +209,13 @@ private struct DiffSplitDivider: View {
 
 /// Above the diff: totals, Reload, and Submit Review with the draft count.
 private struct DiffSummaryBar: View {
-    /// `UserDefaults` key: whether the file tree shows beside the diff.
-    static let showsFilesKey = "showsFileTree"
-
     let review: PRReview
     let files: [DiffFileModel]
     @Binding var isSubmitPresented: Bool
-    @AppStorage(DiffSummaryBar.showsFilesKey) private var showsFiles = true
 
     var body: some View {
         let viewed = review.viewedPaths
         HStack(spacing: 12) {
-            Button("Files", systemImage: "sidebar.left") { showsFiles.toggle() }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .help(showsFiles ? "Hide the file tree" : "Show the file tree")
             Text(countLabel(files.count, "file")).fontWeight(.medium)
             DiffLineCounts(additions: files.reduce(0) { $0 + $1.additions },
                            deletions: files.reduce(0) { $0 + $1.deletions })

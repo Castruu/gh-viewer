@@ -2,6 +2,9 @@ import SwiftUI
 
 /// The open PR's changed files as a folder tree, beside the diff. Clicking a file scrolls the diff to it.
 struct DiffFileList: View {
+    /// `UserDefaults` key: whether the tree shows. The toolbar and the Review menu switch it.
+    static let showsKey = "showsFileTree"
+
     let review: PRReview
     /// The sidebar's filter: leave out the files already checked as viewed.
     @AppStorage("sidebarHidesViewedFiles") private var hidesViewed = false

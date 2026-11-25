@@ -154,8 +154,13 @@ private struct FooterView: View {
             .keyboardShortcut("o")
             .help("Open the review window (⌘O)")
 
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.borderless)
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                // Grey, so opening the window is the one colored action in the footer.
+                Text("Quit").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
                 .keyboardShortcut("q")
         }
         .font(.caption)
