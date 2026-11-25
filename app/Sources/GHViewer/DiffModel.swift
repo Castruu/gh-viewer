@@ -23,9 +23,18 @@ struct DiffFileModel: Identifiable {
     /// Width of one line-number column, sized for the file's largest number.
     let numberWidth: CGFloat
 
+    /// For a removed line and the added line that replaced it: the characters that differ, by row position.
+    let emphasis: [Int: Range<Int>]
+
     var id: String { file.path }
     var lineCount: Int { positions.count }
     var isLarge: Bool { lineCount > Self.largeLineCount }
+    /// Lockfiles, generated code and data dumps: files a reviewer skims at most, so they start collapsed.
+    var isNoise: Bool {
+        file.path.isGeneratedOrLockFile || (file.path.isDataFile && lineCount > Self.largeDataLineCount)
+    }
+    /// A small fixture is worth reading; a long data file isn't.
+    static let largeDataLineCount = 200
 
     /// `index` is the file's place in the diff, which keeps its row ids apart from other files'.
     init(_ file: DiffFile, index: Int) {
@@ -47,6 +56,30 @@ struct DiffFileModel: Identifiable {
                 largest = max(largest, line.oldLine ?? 0, line.newLine ?? 0)
             }
         }
+        // Pair each run of removed lines with the run of added lines right after it, line for line.
+        var emphasis: [Int: Range<Int>] = [:]
+        func text(_ row: Int, _ kind: LineKind) -> String? {
+            guard row < rows.count, case .line(let line) = rows[row].kind, line.kind == kind else { return nil }
+            return line.text
+        }
+        var row = 0
+        while row < rows.count {
+            let firstRemoved = row
+            while text(row, .removed) != nil { row += 1 }
+            let firstAdded = row
+            while text(row, .added) != nil { row += 1 }
+            if firstAdded > firstRemoved, row - firstAdded == firstAdded - firstRemoved {
+                for offset in 0..<(firstAdded - firstRemoved) {
+                    if let old = text(firstRemoved + offset, .removed), let new = text(firstAdded + offset, .added),
+                       let changed = DiffHighlight.changedRanges(old: old, new: new) {
+                        emphasis[firstRemoved + offset] = changed.old
+                        emphasis[firstAdded + offset] = changed.new
+                    }
+                }
+            }
+            if row == firstRemoved { row += 1 }
+        }
+        self.emphasis = emphasis
         self.rows = rows
         self.positions = positions
         self.additions = additions
@@ -262,6 +295,21 @@ enum DiffStyle {
 }
 
 extension String {
+    var isGeneratedOrLockFile: Bool {
+        let name = splitPath.name.lowercased()
+        if ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum", "package.resolved", "bun.lockb"].contains(name)
+            || [".lock", ".min.js", ".min.css", ".map", ".snap", ".pb.go", ".g.dart", ".generated.swift"].contains(where: name.hasSuffix) {
+            return true
+        }
+        let path = "/" + lowercased()
+        return ["/dist/", "/vendor/", "/node_modules/", "/__snapshots__/", "/generated/"].contains(where: path.contains)
+    }
+
+    var isDataFile: Bool {
+        let name = lowercased()
+        return [".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".svg"].contains(where: name.hasSuffix)
+    }
+
     /// "Sources/App/" and "File.swift", for paths drawn with the directory dimmed.
     var splitPath: (directory: String, name: String) {
         guard let slash = lastIndex(of: "/") else { return ("", self) }

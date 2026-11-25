@@ -174,6 +174,7 @@ struct ThemeSettings: View {
     @AppStorage(ThemeKey.palette) private var paletteID = Palette.cool.id
     @AppStorage(ThemeKey.appearance) private var appearance = Appearance.system
     @AppStorage(AppIcon.key) private var appIcon = AppIcon.moss
+    @AppStorage(Notifier.key) private var notifies = true
 
     var body: some View {
         Form {
@@ -184,6 +185,7 @@ struct ThemeSettings: View {
                 ForEach(Appearance.allCases) { Text($0.name).tag($0) }
             }
             .pickerStyle(.segmented)
+            Toggle("Notify about review requests and failing checks", isOn: $notifies)
             LabeledContent("App Icon") {
                 HStack(spacing: 8) {
                     ForEach(AppIcon.allCases) { icon in

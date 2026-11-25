@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct GHViewerApp: App {
@@ -15,7 +16,11 @@ struct GHViewerApp: App {
             MenuBarLabel(reviewCount: model.dashboard?.reviewRequested.count,
                          hasError: model.errorMessage != nil)
                 // Opening the app again from Finder or Spotlight shows the review window.
-                .onReceive(NotificationCenter.default.publisher(for: AppDelegate.reopen)) { _ in
+                // A clicked notification carries the PR it's about.
+                .onReceive(NotificationCenter.default.publisher(for: AppDelegate.reopen)) { reopen in
+                    if let url = reopen.object as? String {
+                        model.selectedPullRequestURL = url
+                    }
                     openWindow.reviewWindow()
                 }
                 // Development aid, for screenshots without clicking the menu bar:
@@ -38,6 +43,7 @@ struct GHViewerApp: App {
         .defaultSize(width: 1280, height: 800)
         // The window says what it is; the name only takes room from the toolbar.
         .windowToolbarStyle(.unified(showsTitle: false))
+        .commands { ReviewCommands() }
 
         Settings {
             ThemeSettings()
@@ -55,12 +61,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let saved = UserDefaults.standard.string(forKey: ThemeKey.appearance) ?? ""
         NSApp.appearance = Appearance(rawValue: saved)?.nsAppearance
+        UNUserNotificationCenter.current().delegate = self
         AppIcon(rawValue: UserDefaults.standard.string(forKey: AppIcon.key) ?? "")?.apply()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         NotificationCenter.default.post(name: Self.reopen, object: nil)
         return false
+    }
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    /// Clicking a notification opens its PR in the review window.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let url = response.notification.request.content.userInfo["url"] as? String
+        await MainActor.run {
+            NotificationCenter.default.post(name: Self.reopen, object: url)
+        }
+    }
+
+    /// Shown even while the review window is in front: the news may be about another PR.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner]
     }
 }
 
