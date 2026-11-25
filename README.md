@@ -60,21 +60,22 @@ There's nothing to configure in GH Viewer.
 
 ### Your review queue, one click away
 
-<img src="docs/assets/screenshots/menu-bar.png" width="380" align="right" alt="The menu bar list: PRs waiting on your review and your own PRs, each with its repo, age and status">
+<img src="docs/assets/screenshots/menu-bar.png" width="380" align="right" alt="The menu bar list: PRs waiting on your review and your own PRs, each with its review icon, repo, author, age and status">
 
 The menu bar shows the PRs that wait on your review (the icon shows how many)
 and your own open PRs, five of each, with a link to the window for the rest.
 Click one to review it, right-click to open it in your browser.
 
 Each row has the review decision as an icon on the left (approved, changes
-requested, review required, or none yet), then what the PR does, its repo,
-number, author and age. A status in words shows when there is news: Checks failing,
+requested, review required, or none yet), then what the PR does (a `feat(x):`
+prefix is left out), its repo, number, author and age. A status in words shows when there is news: Checks failing,
 Changes requested, Draft, Approved or Checks running.
 
 It refreshes every 2 minutes (every 10 in Low Power Mode), and when you open the
 menu if the data is more than 30 seconds old. **⌘R** refreshes now. A notification
 tells you about a new review request, a re-request, and checks that start failing
-on your own PR; Settings turns that off.
+on your own PR. Click it to open that PR. macOS asks once whether to allow
+notifications, and Settings turns them off.
 
 Colors follow the theme you pick in Settings (**⌘,** with the review window open):
 Cool, Soft, Focus or Vivid, in light or dark. Settings also has four app icons
@@ -89,24 +90,26 @@ to pick from for the Dock.
 - The sidebar lists your PRs by what they need: your review, your own, and the
   ones you've already reviewed. Its filter button hides the sections, or the
   viewed files, you don't need to see.
-- The open PR's files are a folder tree beside the diff, with folders closed
-  until you open them. The button on the tree folds it away (**⇧⌘F**).
 - The window opens on the PR you had open last, or the first one waiting on
-  you, and moves to the next one after you submit a review.
-- Hover a diff line for the "+", then click the line to comment on it or ask
-  the agent about it.
+  you, and moves to the next one after you submit a review. That next PR is
+  fetched ahead, so it's there when you get to it.
 - The PR's description sits under its title, one line until you open it. Failing
   checks are named there, each a link to its run.
+- The open PR's files are a folder tree beside the diff, with folders closed
+  until you open them and a checkmark on the files you've viewed. The button on
+  the tree folds it away (**⇧⌘F**).
 - A unified diff computed from a local checkout, not fetched from GitHub's API,
   with basic syntax colors. An edited line marks the part that changed.
-- Lock, generated and long data files start folded.
+- "Viewed" checkboxes sync with GitHub. Viewed files start collapsed, and so do
+  very large files, lock files, generated files and long data files.
 - After you've reviewed a PR, "Since Your Review" narrows it to the files that
   changed since.
+- Review threads from GitHub, placed on the lines they're about.
+- Hover a diff line for the "+", then click the line to comment on it or ask
+  the agent about it.
 - The Review menu steps through a review from the keyboard: next and previous
   file (**⌥⌘↓**, **⌥⌘↑**), mark viewed (**⌥⌘V**), comment (**⌥⌘C**), ask the agent
   (**⌥⌘A**), submit (**⇧⌘↩**).
-- "Viewed" checkboxes sync with GitHub. Viewed and very large files start collapsed.
-- Review threads from GitHub, placed on the lines they're about.
 - The agent chat sits beside the diff. Close it from the toolbar and it stays closed.
 
 ### An agent that has read the code
@@ -147,6 +150,10 @@ to pick from for the Dock.
 - **Your data stays local.** Clones, per-PR worktrees, drafts and chats live in
   `~/Library/Application Support/GHViewer`. To reclaim disk space, delete the
   `repos` and `worktrees` folders there while the app isn't running.
+- **What it fetches without a click.** The review window loads the PR it opens
+  on and the next one waiting on your review, which clones their repos the first
+  time. In Low Power Mode it skips the one ahead. At most six PRs keep their diff
+  in memory.
 
 ## How it works
 
@@ -168,7 +175,7 @@ to pick from for the Dock.
 app/    SwiftUI app (menu bar + review window). Thin: UI and state only.
 core/   Rust library, exported via UniFFI:
           lib.rs       GitHub GraphQL client, dashboard
-          pr.rs        PR detail, threads, viewed state, drafts, review submission
+          pr.rs        PR detail, threads, checks, viewed state, drafts, review submission
           checkout.rs  blobless clones, a worktree per PR, local diff
           agent.rs     ACP client for Claude Code and Codex
           mcp.rs       localhost MCP server with the agents' review tools
@@ -176,6 +183,7 @@ core/   Rust library, exported via UniFFI:
 docs/design.md  decisions and data flows for the review window
 uniffi-bindgen/  Generates the Swift bindings for core.
 scripts/build.sh  cargo build -> generate bindings -> swift build -> .app bundle
+scripts/make-icon.swift  renders an icon's SVG to .icns or .png, adding its grain
 ```
 
 ## FAQ
@@ -210,8 +218,13 @@ or opening `app/` in an editor.
 `open build/GHViewer.app --args --open-review-window [<PR URL>]` opens the
 review window at launch, optionally with a PR from your lists selected.
 
-The app icon's source is `docs/assets/icon.svg`; `app/AppIcon.icns` is rendered
-from it.
+The app icon's source is `docs/assets/icon.svg`. The four icons to pick from in
+Settings are in `docs/assets/icons`. Render them after a change:
+
+```sh
+swift scripts/make-icon.swift                                               # app/AppIcon.icns
+swift scripts/make-icon.swift docs/assets/icons/moss.svg app/Icons/icon-moss.png
+```
 
 ### Tests
 
