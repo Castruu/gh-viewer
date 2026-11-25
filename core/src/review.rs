@@ -751,6 +751,49 @@ mod tests {
         assert_eq!(stored[0].commit_oid, review.checkout.head_oid);
     }
 
+    /// Asks what the app asks, turn after turn in one session, and fails on a turn
+    /// that doesn't end. Writes only to a temp dir. GHV_ACP_LOG=<file> logs the
+    /// wire; GHV_LIVE_AGENT=claude, GHV_LIVE_PR=owner/repo#n and GHV_LIVE_QUESTIONS
+    /// (split on `|`) change what it asks.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs network, a gh login with access to the PR, and a signed-in agent"]
+    async fn live_turns_end() {
+        let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
+        let kind = if var("GHV_LIVE_AGENT", "codex") == "claude" { AgentKind::Claude } else { AgentKind::Codex };
+        let pr = var("GHV_LIVE_PR", "atiraOrg/atira-sandbox#169");
+        let (repo, number) = pr.split_once('#').expect("GHV_LIVE_PR is owner/repo#n");
+        let (repo, number) = (repo.to_string(), number.parse().unwrap());
+        let questions = var(
+            "GHV_LIVE_QUESTIONS",
+            "Summarize this PR|What does the first changed file do?|Run `git diff --stat HEAD~1` and tell me the result.",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let drafts = Arc::new(DraftStore::new(root.clone()));
+        let recorder = Arc::new(Recorder::default());
+        let hub = ReviewHub::new(root, Arc::new(GitHubClient::new()), drafts, recorder.clone());
+        hub.open(repo.clone(), number).await.unwrap();
+        let session = hub.start_agent(kind, repo, number).await.unwrap();
+        for question in questions.split('|') {
+            let start = std::time::Instant::now();
+            let ask = hub.ask(session.clone(), None, question.into());
+            let stop = match tokio::time::timeout(std::time::Duration::from_secs(300), ask).await {
+                Ok(stop) => stop.unwrap(),
+                Err(_) => "no reply in 300 s".into(),
+            };
+            let events = std::mem::take(&mut *recorder.0.lock().unwrap());
+            let tools: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ToolCall { title, .. } => Some(title.as_str()),
+                    _ => None,
+                })
+                .collect();
+            eprintln!("{question:?}: {stop} in {:.1?}, tools {tools:?}", start.elapsed());
+            assert_eq!(stop, "end_turn", "events: {events:?}");
+        }
+    }
+
     #[test]
     fn agent_drafts_land_in_the_store_pinned_to_the_head() {
         let dir = tempfile::tempdir().unwrap();

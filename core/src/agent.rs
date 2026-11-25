@@ -756,7 +756,16 @@ fn launch_adapter(
         let config = AcpAgentConfig::new(npx)
             .args(["-y", kind.package()])
             .envs(env);
+        // GHV_ACP_LOG=<file> appends every line in both directions, for debugging an adapter.
+        let log = std::env::var_os("GHV_ACP_LOG")
+            .and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok())
+            .map(Mutex::new);
+        let start = std::time::Instant::now();
         let agent = AcpAgent::new(config).with_debug(move |line, direction| {
+            if let Some(Ok(mut file)) = log.as_ref().map(Mutex::lock) {
+                use std::io::Write as _;
+                let _ = writeln!(file, "{:>8.3} {kind:?} {direction:?} {line}", start.elapsed().as_secs_f64());
+            }
             if direction == LineDirection::Stderr {
                 stderr.push(line);
             }
