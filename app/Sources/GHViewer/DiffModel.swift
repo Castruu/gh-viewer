@@ -102,8 +102,9 @@ struct DiffAnnotations {
     var pending: [DiffAnchor: [PendingComment]] = [:]
     var notes: [String: DiffFileNotes] = [:]
 
-    /// `threadsInline` is false while drafts pin the diff to an older commit, since thread lines
-    /// refer to the latest push. `pendingInline` is false when the pending review is on another commit.
+    /// `threadsInline` is false when the diff isn't on the commit GitHub placed the threads on:
+    /// drafts pin it to an older one, or a push landed while it loaded. `pendingInline` is false
+    /// when the pending review is on another commit.
     init(threads: [ReviewThread], drafts: [DraftComment], pending: [PendingComment],
          threadsInline: Bool, pendingInline: Bool) {
         for thread in threads {
@@ -142,7 +143,7 @@ struct DiffAnnotations {
 struct DiffFileNotes {
     /// Threads on lines that are no longer in the PR.
     var outdated: [ReviewThread] = []
-    /// Threads on the latest push, while drafts hold the diff on an older commit.
+    /// Threads placed on another commit than the diff's, usually the latest push while drafts hold an older one.
     var latestPush: [ReviewThread] = []
     /// Your pending github.com comments on the whole file, or started on another commit.
     var pending: [PendingComment] = []

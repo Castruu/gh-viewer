@@ -89,12 +89,17 @@ impl ReviewHub {
     /// Fetches the PR, checks it out and diffs it. While the PR has drafts, the
     /// checkout stays on the commit they were written against.
     pub async fn open(&self, repo: String, number: u64) -> Result<OpenedReview, CoreError> {
-        let detail = self.github.fetch_pull_request(repo.clone(), number).await?;
+        let mut detail = self.github.fetch_pull_request(repo.clone(), number).await?;
         let pin = self.drafts.pinned_commit(repo.clone(), number)?;
         let checkout = self
             .checkouts
             .prepare(repo.clone(), number, detail.base_ref_name.clone(), pin)
             .await?;
+        // A push between the two reads leaves thread positions on another commit.
+        // If it persists, the diff lists threads by file instead of inline.
+        if detail.head_oid != checkout.latest_head_oid {
+            detail = self.github.fetch_pull_request(repo.clone(), number).await?;
+        }
         let files = self.checkouts.diff(checkout.clone()).await?;
         let review = OpenedReview { detail, checkout, files };
 

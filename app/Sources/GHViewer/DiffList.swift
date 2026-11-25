@@ -21,7 +21,7 @@ struct DiffList: View {
         let pendingReview = opened?.detail.pendingReview
         let annotations = DiffAnnotations(threads: opened?.detail.threads ?? [], drafts: review.drafts,
                                           pending: pendingReview?.comments ?? [],
-                                          threadsInline: !review.hasNewerCommits,
+                                          threadsInline: opened?.detail.headOid == opened?.checkout.headOid,
                                           pendingInline: pendingReview?.commitOid == opened?.checkout.headOid)
         let viewed = review.viewedPaths
         ScrollViewReader { proxy in
@@ -297,7 +297,9 @@ struct DiffFileNotesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !notes.latestPush.isEmpty {
-                Text("These threads refer to lines in the latest push. Your drafts hold the diff on \(review.shortHeadOid); submit or discard them to see the threads in place.")
+                Text(review.hasNewerCommits
+                     ? "These threads refer to lines in the latest push. Your drafts hold the diff on \(review.shortHeadOid); submit or discard them to see the threads in place."
+                     : "These threads refer to lines in a push that landed while the diff loaded. Reload to see them in place.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 ForEach(notes.latestPush, id: \.id) { DiffThreadView(thread: $0) }
