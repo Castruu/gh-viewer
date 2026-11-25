@@ -25,9 +25,18 @@ extension PRReview {
         String(opened?.checkout.headOid.prefix(7) ?? "")
     }
 
-    /// Comments in your pending review on github.com, which submitting sends too.
+    /// Comments you started on github.com in your pending review, which submitting sends too.
+    /// Drafts from here that an earlier try already put in it don't count.
     var pendingCommentCount: Int? {
-        opened?.detail.pendingReview?.comments.count
+        opened?.detail.pendingReview.map { Self.startedOnGitHub($0.comments, drafts: drafts) }
+    }
+
+    /// How many of `comments` aren't one of `drafts`, matched like the core does: path, line and text.
+    nonisolated static func startedOnGitHub(_ comments: [PendingComment], drafts: [DraftComment]) -> Int {
+        let trimmed = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return comments.filter { comment in
+            !drafts.contains { $0.path == comment.path && $0.line == comment.line && trimmed($0.body) == trimmed(comment.body) }
+        }.count
     }
 }
 

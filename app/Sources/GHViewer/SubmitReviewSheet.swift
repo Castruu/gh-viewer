@@ -44,6 +44,13 @@ struct SubmitReviewSheet: View {
 
             SubmitDraftSummary(drafts: confirmed)
 
+            let inReview = confirmed.filter { review.draftsInReview.contains($0.id) }.count
+            if inReview > 0 {
+                Label("\(countLabel(inReview, "draft")) of these \(inReview == 1 ? "is" : "are") already in your pending review on GitHub from an earlier try. Submitting sends that review.",
+                      systemImage: "info.circle")
+                    .foregroundStyle(.secondary)
+            }
+
             if let pending = review.pendingCommentCount, pending > 0 {
                 Label("Also submits \(countLabel(pending, "comment")) you started on github.com.", systemImage: "info.circle")
                     .foregroundStyle(.secondary)
