@@ -276,6 +276,8 @@ impl CheckoutManager {
                 .map_err(checkout_error())?;
             }
         }
+        // On every prepare, so worktrees made before this lose them too.
+        hide_agent_config(wt).await.map_err(checkout_error())?;
 
         Ok(Checkout {
             repo,
@@ -373,6 +375,17 @@ impl CheckoutManager {
 
 /// A full commit id as git prints it. Ids are passed as arguments, so this also
 /// makes sure none can be read as an option.
+/// Keeps the files agents load from their cwd as config out of the worktree `wt`:
+/// hooks, MCP servers and permissions that the PR's author would run on this
+/// machine. The diff is between commits, so it still shows them.
+pub(crate) async fn hide_agent_config(wt: &str) -> Result<String, String> {
+    git(&[
+        "-C", wt, "sparse-checkout", "set", "--no-cone",
+        "/*", "!/.claude/", "!/.codex/", "!/.mcp.json",
+    ])
+    .await
+}
+
 fn is_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -1028,6 +1041,40 @@ Binary files "a/bin\tary" and "b/bin\tary" differ
 
     fn read(dir: &str, path: &str) -> String {
         std::fs::read_to_string(format!("{dir}/{path}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn keeps_agent_config_out_of_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tmp.path().to_str().unwrap();
+        let remote = format!("{tmp}/remote/octo/demo.git");
+        let work = format!("{tmp}/work");
+        for dir in [&remote, &format!("{work}/.codex"), &format!("{work}/.claude"), &format!("{work}/src/.claude")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        run(&remote, &["init", "-q", "--bare"]);
+        run(&work, &["init", "-q", "-b", "main"]);
+        commit(&work, &[("a.txt", "one\n")]);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/heads/main"]);
+        let config = [
+            (".codex/config.toml", "[mcp_servers.x]\n"),
+            (".claude/settings.json", "{}\n"),
+            (".mcp.json", "{}\n"),
+            ("src/.claude/notes.md", "kept\n"),
+        ];
+        commit(&work, &config);
+        run(&work, &["push", "-q", &remote, "HEAD:refs/pull/1/head"]);
+
+        let manager =
+            CheckoutManager::with_remote_base(format!("{tmp}/data"), format!("file://{tmp}/remote/"));
+        let checkout = manager.prepare("octo/demo".into(), 1, "main".into(), None).await.unwrap();
+        let wt = &checkout.worktree_path;
+        for hidden in [".codex", ".claude", ".mcp.json"] {
+            assert!(!Path::new(&format!("{wt}/{hidden}")).exists(), "{hidden}");
+        }
+        assert_eq!(read(wt, "a.txt"), "one\n");
+        assert_eq!(read(wt, "src/.claude/notes.md"), "kept\n");
+        assert_eq!(manager.diff(checkout).await.unwrap().len(), config.len());
     }
 
     #[tokio::test]

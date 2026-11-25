@@ -248,7 +248,14 @@ impl AgentHub {
                 )
             })
             .collect();
-        let request = acp::NewSessionRequest::new(PathBuf::from(cwd)).mcp_servers(servers);
+        let mut request = acp::NewSessionRequest::new(PathBuf::from(cwd)).mcp_servers(servers);
+        if kind == AgentKind::Claude {
+            // The cwd holds the PR's code: load the user's own settings, never its hooks, MCP servers or permissions.
+            let meta = serde_json::json!({ "claudeCode": { "options": { "settingSources": ["user"] } } });
+            if let serde_json::Value::Object(meta) = meta {
+                request = request.meta(meta);
+            }
+        }
         let response =
             tokio::time::timeout(SETUP_TIMEOUT, process.cx.send_request(request).block_task())
                 .await
@@ -1418,6 +1425,59 @@ mod tests {
                 .any(|chunk| chunk.to_lowercase().contains("pong")),
             "{chunks:?}"
         );
+    }
+
+    /// Opens a session in a repo whose committed agent config (Claude hooks, a
+    /// Codex stdio MCP server) touches a marker, as a PR's could. True if it ran.
+    /// `hide` applies the worktree rule from `checkout::hide_agent_config` first.
+    async fn runs_project_config(kind: AgentKind, hide: bool) -> bool {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = (tmp.path().join("repo"), tmp.path().join("marker"));
+        let marker = marker.to_str().unwrap();
+        let touch = serde_json::json!([{ "hooks": [{ "type": "command", "command": format!("touch {marker}") }] }]);
+        let claude = serde_json::json!({ "hooks": { "SessionStart": touch, "UserPromptSubmit": touch } });
+        let codex = format!("[mcp_servers.probe]\ncommand = \"/usr/bin/touch\"\nargs = [\"{marker}\"]\n");
+        for dir in [".claude", ".codex"] {
+            std::fs::create_dir_all(repo.join(dir)).unwrap();
+        }
+        std::fs::write(repo.join(".claude/settings.json"), claude.to_string()).unwrap();
+        std::fs::write(repo.join(".codex/config.toml"), codex).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("/usr/bin/git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&repo)
+                .status();
+            assert!(status.unwrap().success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "config"]);
+        if hide {
+            crate::checkout::hide_agent_config(repo.to_str().unwrap()).await.unwrap();
+        }
+
+        let (sender, _events) = mpsc::unbounded_channel();
+        let hub = AgentHub::new(Arc::new(Recorder(sender)));
+        let session = hub
+            .new_session(kind, repo.to_string_lossy().into(), vec![])
+            .await
+            .unwrap();
+        let stop = hub.prompt(session, "Reply with exactly: pong".into()).await.unwrap();
+        assert_eq!(stop, "end_turn");
+        std::path::Path::new(marker).exists()
+    }
+
+    #[tokio::test]
+    #[ignore = "spawns the real Claude adapter and spends tokens"]
+    async fn claude_ignores_the_projects_settings() {
+        assert!(!runs_project_config(AgentKind::Claude, false).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "spawns the real Codex adapter and spends tokens"]
+    async fn codex_ignores_a_hidden_projects_config() {
+        assert!(!runs_project_config(AgentKind::Codex, true).await);
     }
 
     #[tokio::test]
