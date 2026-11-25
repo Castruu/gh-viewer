@@ -11,6 +11,9 @@ extension PRReview {
         Set(opened?.detail.files.filter { $0.viewed == .viewed }.map(\.path) ?? [])
     }
 
+    /// Why "Viewed" is off while `hasNewerCommits`: GitHub marks a path, so it would cover changes not shown here.
+    static let viewedPinnedHelp = "Unavailable while the diff is on an older commit: GitHub would also mark the newer changes to this file as viewed"
+
     /// The commit the diff shows, which is the drafts' commit while they hold it.
     var shortHeadOid: String {
         String(opened?.checkout.headOid.prefix(7) ?? "")

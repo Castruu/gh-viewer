@@ -15,7 +15,8 @@ struct DiffFileList: View {
             selection = path
             if let path { select(path) }
         })) { file in
-            DiffFileRow(file: file, draftCount: draftCounts[file.id] ?? 0, isViewed: viewed.contains(file.id)) {
+            DiffFileRow(file: file, draftCount: draftCounts[file.id] ?? 0, isViewed: viewed.contains(file.id),
+                        canMarkViewed: !review.hasNewerCommits) {
                 setViewed(file.id, $0)
             }
         }
@@ -27,6 +28,7 @@ private struct DiffFileRow: View {
     let file: DiffFileModel
     let draftCount: Int
     let isViewed: Bool
+    let canMarkViewed: Bool
     let setViewed: (Bool) -> Void
 
     var body: some View {
@@ -55,7 +57,9 @@ private struct DiffFileRow: View {
             Toggle("Viewed", isOn: Binding(get: { isViewed }, set: setViewed))
                 .toggleStyle(.checkbox)
                 .labelsHidden()
-                .help(isViewed ? "Viewed on GitHub. Uncheck to mark as not viewed" : "Mark as viewed on GitHub")
+                .disabled(!canMarkViewed)
+                .help(!canMarkViewed ? PRReview.viewedPinnedHelp
+                      : isViewed ? "Viewed on GitHub. Uncheck to mark as not viewed" : "Mark as viewed on GitHub")
         }
         .opacity(isViewed ? 0.6 : 1)
         .help(file.file.oldPath.map { "\($0) → \(file.id)" } ?? file.id)
